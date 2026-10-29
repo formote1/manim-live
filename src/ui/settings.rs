@@ -1,12 +1,13 @@
 use crate::runner::Quality;
 use crate::ui::theme::{ThemeId, ThemePalette};
-use crossterm::event::{KeyCode, KeyEvent};
+use crate::ui::FocusPane;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Clear, Paragraph, Widget},
+    widgets::{Paragraph, Widget},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,7 +77,7 @@ impl EditorChoice {
     }
 }
 
-pub const ALLOWED_FPS: [u32; 4] = [15, 24, 30, 60];
+pub const ALLOWED_FPS: [u32; 5] = [15, 24, 30, 60, 120];
 pub const ALLOWED_QUALITIES: [Quality; 4] = [
     Quality::Low,
     Quality::Medium,
@@ -93,14 +94,20 @@ pub fn quality_label(q: Quality) -> &'static str {
     }
 }
 
+pub const TOTAL_SETTINGS_ROWS: usize = 4;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettingsAction {
     None,
     Close,
+    Quit,
     ApplyTheme(ThemeId),
     ApplyEditor(String),
     ApplyQuality(Quality),
     ApplyFps(u32),
+    FocusPane(FocusPane),
+    TriggerRebuild,
+    OpenScenes,
 }
 
 pub struct SettingsState {
@@ -123,13 +130,25 @@ impl SettingsState {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsAction {
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('q') | KeyCode::Char('Q'))
+        {
+            return SettingsAction::Quit;
+        }
+
         match key.code {
-            KeyCode::Esc | KeyCode::F(4) | KeyCode::Char('?') => SettingsAction::Close,
-            KeyCode::Char('q') | KeyCode::Char('Q') => SettingsAction::Close,
+            KeyCode::Esc | KeyCode::F(4) | KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                SettingsAction::Close
+            }
+            KeyCode::F(1) => SettingsAction::FocusPane(FocusPane::Editor),
+            KeyCode::F(2) => SettingsAction::FocusPane(FocusPane::Preview),
+            KeyCode::F(3) => SettingsAction::FocusPane(FocusPane::Console),
+            KeyCode::F(5) => SettingsAction::TriggerRebuild,
+            KeyCode::F(8) => SettingsAction::OpenScenes,
 
             KeyCode::Up | KeyCode::Char('k') => {
                 if self.selected_row == 0 {
-                    self.selected_row = 3;
+                    self.selected_row = TOTAL_SETTINGS_ROWS - 1;
                 } else {
                     self.selected_row -= 1;
                 }
@@ -137,18 +156,26 @@ impl SettingsState {
             }
 
             KeyCode::Down | KeyCode::Char('j') => {
-                self.selected_row = (self.selected_row + 1) % 4;
+                self.selected_row = (self.selected_row + 1) % TOTAL_SETTINGS_ROWS;
                 SettingsAction::None
             }
 
-            KeyCode::Left | KeyCode::Char('h') => self.adjust_current(false),
+            KeyCode::Left | KeyCode::Char('h') => {
+                self.adjust_current(false)
+            }
 
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter | KeyCode::Char(' ') => {
+            KeyCode::Right | KeyCode::Char('l') => {
                 self.adjust_current(true)
             }
 
+            KeyCode::Enter | KeyCode::Char(' ') => self.activate_current(),
+
             _ => SettingsAction::None,
         }
+    }
+
+    fn activate_current(&mut self) -> SettingsAction {
+        self.adjust_current(true)
     }
 
     fn adjust_current(&mut self, next: bool) -> SettingsAction {
@@ -173,7 +200,7 @@ impl SettingsState {
                 let idx = ALLOWED_QUALITIES
                     .iter()
                     .position(|&q| q == self.quality)
-                    .unwrap_or(1);
+                    .unwrap_or(0);
                 let new_idx = if next {
                     (idx + 1) % ALLOWED_QUALITIES.len()
                 } else if idx == 0 {
@@ -204,191 +231,242 @@ impl SettingsState {
     }
 }
 
+pub fn calculate_modal_area(area: Rect) -> Rect {
+    let modal_w = if area.width >= 85 {
+        83
+    } else {
+        area.width.saturating_sub(2).max(20)
+    };
+    let modal_h = if area.height >= 26 {
+        24
+    } else {
+        area.height.saturating_sub(2).max(14)
+    };
+
+    let offset_x = (area.width.saturating_sub(modal_w)) / 2;
+    let offset_y = (area.height.saturating_sub(modal_h)) / 2;
+    Rect::new(area.x + offset_x, area.y + offset_y, modal_w, modal_h)
+}
+
+pub fn clear_settings_logo() {
+    crate::ui::preview::clear_kitty_image_id(2);
+}
+
 pub fn render_settings_overlay(
     state: &SettingsState,
     area: Rect,
     buf: &mut Buffer,
     palette: &ThemePalette,
 ) {
-    // Center modal inside window
-    let modal_w = 70.min(area.width.saturating_sub(2));
-    let modal_h = 22.min(area.height.saturating_sub(2));
+    let modal_area = calculate_modal_area(area);
 
-    let offset_x = (area.width.saturating_sub(modal_w)) / 2;
-    let offset_y = (area.height.saturating_sub(modal_h)) / 2;
-    let modal_area = Rect::new(area.x + offset_x, area.y + offset_y, modal_w, modal_h);
+    // Completely wipe the modal area with bg_crust so background text/wallpaper never bleeds through
+    for r in 0..modal_area.height {
+        for c in 0..modal_area.width {
+            if let Some(cell) = buf.cell_mut((modal_area.x + c, modal_area.y + r)) {
+                cell.set_symbol(" ");
+                cell.set_style(Style::default().bg(palette.bg_crust));
+            }
+        }
+    }
 
-    // Blank out underlying cells
-    Clear.render(modal_area, buf);
-
-    let block = Block::default()
+    let block = ratatui::widgets::Block::default()
         .title(" ❪ Settings & Studio Customization ❫ ")
         .title_alignment(Alignment::Center)
         .borders(ratatui::widgets::Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(
-            Style::default()
-                .fg(palette.border_focused)
-                .add_modifier(Modifier::BOLD),
-        );
-
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(palette.accent_mauve).add_modifier(Modifier::BOLD));
     let inner_area = block.inner(modal_area);
     block.render(modal_area, buf);
 
-    let show_ascii = inner_area.height >= 18;
+    let show_full_ascii = inner_area.width >= 77 && inner_area.height >= 19;
 
-    // Layout inside modal: Header, Settings rows, Footer
-    let chunks = if show_ascii {
+    let chunks = if show_full_ascii {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(4), // ASCII Art MANIM-LIVE
-                Constraint::Length(1), // Spacer
-                Constraint::Length(2), // Subtitle / navigation tips
-                Constraint::Length(8), // 4 setting rows (each 2 rows)
-                Constraint::Min(0),    // Spacer
-                Constraint::Length(2), // Bottom hints
+                Constraint::Length(6),  // 6-line exact ASCII art
+                Constraint::Length(1),  // Subtitle
+                Constraint::Length(1),  // Divider
+                Constraint::Length(11), // 4 settings (2 lines each + 1 line spacer = 11 lines)
+                Constraint::Min(0),     // Spacer
+                Constraint::Length(1),  // Legend footer
             ])
             .split(inner_area)
     } else {
         Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(0),
-                Constraint::Length(0),
-                Constraint::Length(2),
-                Constraint::Length(8),
-                Constraint::Min(0),
-                Constraint::Length(2),
+                Constraint::Length(1),  // Compact title
+                Constraint::Length(1),  // Divider
+                Constraint::Min(8),     // Settings list
+                Constraint::Length(1),  // Legend footer
             ])
             .split(inner_area)
     };
 
-    // ASCII Art Header
-    if show_ascii {
+    // Render BIG ASCII Art Header
+    if show_full_ascii {
         let ascii_lines = vec![
             Line::from(vec![
-                Span::styled("█▀▄▀█ ▄▀▀█ █▄  █ █ █▀▄▀█", Style::default().fg(palette.accent_mauve).add_modifier(Modifier::BOLD)),
-                Span::styled("          ", Style::default().fg(palette.warn_peach)),
-                Span::styled("█    █ █   █ █▀▀▀", Style::default().fg(palette.accent_sapphire).add_modifier(Modifier::BOLD)),
+                Span::styled("███╗   ███╗ █████╗ ███╗   ██╗██╗███╗   ███╗", Style::default().fg(palette.accent_mauve).add_modifier(Modifier::BOLD)),
+                Span::styled("      ", Style::default()),
+                Span::styled("██╗     ██╗██╗   ██╗███████╗", Style::default().fg(palette.accent_sapphire).add_modifier(Modifier::BOLD)),
             ]),
             Line::from(vec![
-                Span::styled("█ █ █ █▀▀█ █ ▀▄█ █ █ █ █", Style::default().fg(palette.accent_mauve).add_modifier(Modifier::BOLD)),
-                Span::styled("   ▄▄▄▄   ", Style::default().fg(palette.warn_peach).add_modifier(Modifier::BOLD)),
-                Span::styled("█    █ █   █ █▀▀ ", Style::default().fg(palette.accent_sapphire).add_modifier(Modifier::BOLD)),
+                Span::styled("████╗ ████║██╔══██╗████╗  ██║██║████╗ ████║", Style::default().fg(palette.accent_mauve).add_modifier(Modifier::BOLD)),
+                Span::styled("      ", Style::default()),
+                Span::styled("██║     ██║██║   ██║██╔════╝", Style::default().fg(palette.accent_sapphire).add_modifier(Modifier::BOLD)),
             ]),
             Line::from(vec![
-                Span::styled("█ █ █ █  █ █   █ █ █ █ █", Style::default().fg(palette.accent_mauve).add_modifier(Modifier::BOLD)),
-                Span::styled("          ", Style::default().fg(palette.warn_peach)),
-                Span::styled("█▄▄▄ █  ▀▄▀  █▄▄▄", Style::default().fg(palette.accent_sapphire).add_modifier(Modifier::BOLD)),
+                Span::styled("██╔████╔██║███████║██╔██╗ ██║██║██╔████╔██║", Style::default().fg(palette.accent_mauve).add_modifier(Modifier::BOLD)),
+                Span::styled("█████╗", Style::default().fg(palette.warn_peach).add_modifier(Modifier::BOLD)),
+                Span::styled("██║     ██║██║   ██║█████╗  ", Style::default().fg(palette.accent_sapphire).add_modifier(Modifier::BOLD)),
             ]),
             Line::from(vec![
-                Span::styled("▀   ▀ ▀  ▀ ▀   ▀ ▀ ▀   ▀", Style::default().fg(palette.accent_mauve).add_modifier(Modifier::BOLD)),
-                Span::styled("          ", Style::default().fg(palette.warn_peach)),
-                Span::styled("▀▀▀▀ ▀   ▀   ▀▀▀▀", Style::default().fg(palette.accent_sapphire).add_modifier(Modifier::BOLD)),
+                Span::styled("██║╚██╔╝██║██╔══██║██║╚██╗██║██║██║╚██╔╝██║", Style::default().fg(palette.accent_mauve).add_modifier(Modifier::BOLD)),
+                Span::styled("╚════╝", Style::default().fg(palette.warn_peach).add_modifier(Modifier::BOLD)),
+                Span::styled("██║     ██║╚██╗ ██╔╝██╔══╝  ", Style::default().fg(palette.accent_sapphire).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(vec![
+                Span::styled("██║ ╚═╝ ██║██║  ██║██║ ╚████║██║██║ ╚═╝ ██║", Style::default().fg(palette.accent_mauve).add_modifier(Modifier::BOLD)),
+                Span::styled("      ", Style::default()),
+                Span::styled("███████╗██║ ╚████╔╝ ███████╗", Style::default().fg(palette.accent_sapphire).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(vec![
+                Span::styled("╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝╚═╝     ╚═╝", Style::default().fg(palette.accent_mauve).add_modifier(Modifier::BOLD)),
+                Span::styled("      ", Style::default()),
+                Span::styled("╚══════╝╚═╝  ╚═══╝  ╚══════╝", Style::default().fg(palette.accent_sapphire).add_modifier(Modifier::BOLD)),
             ]),
         ];
-        let ascii_p = Paragraph::new(ascii_lines).alignment(Alignment::Center);
-        ascii_p.render(chunks[0], buf);
+        let p = Paragraph::new(ascii_lines).alignment(Alignment::Center);
+        p.render(chunks[0], buf);
+
+        let sub_p = Paragraph::new(Line::from(Span::styled(
+            "✦  STUDIO CONFIGURATION & PREFERENCES  ✦",
+            Style::default().fg(palette.text_dimmed).add_modifier(Modifier::BOLD),
+        )))
+        .alignment(Alignment::Center);
+        sub_p.render(chunks[1], buf);
+
+        let div_p = Paragraph::new(Line::from(Span::styled(
+            "─".repeat(chunks[2].width as usize),
+            Style::default().fg(palette.border_unfocused),
+        )));
+        div_p.render(chunks[2], buf);
+    } else {
+        let title_p = Paragraph::new(Line::from(vec![
+            Span::styled("MANIM-LIVE ", Style::default().fg(palette.accent_mauve).add_modifier(Modifier::BOLD)),
+            Span::styled("• STUDIO SETTINGS", Style::default().fg(palette.text_dimmed)),
+        ]))
+        .alignment(Alignment::Center);
+        title_p.render(chunks[0], buf);
+
+        let div_p = Paragraph::new(Line::from(Span::styled(
+            "─".repeat(chunks[1].width as usize),
+            Style::default().fg(palette.border_unfocused),
+        )));
+        div_p.render(chunks[1], buf);
     }
 
-    // Subtitle
-    let subtitle = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled("↑/↓", Style::default().fg(palette.accent_blue).add_modifier(Modifier::BOLD)),
-            Span::styled(" Select  •  ", Style::default().fg(palette.text_dimmed)),
-            Span::styled("←/→/Enter", Style::default().fg(palette.accent_sapphire).add_modifier(Modifier::BOLD)),
-            Span::styled(" Change  •  ", Style::default().fg(palette.text_dimmed)),
-            Span::styled("Esc / F4 / ?", Style::default().fg(palette.warn_peach).add_modifier(Modifier::BOLD)),
-            Span::styled(" Close", Style::default().fg(palette.text_dimmed)),
-        ]),
-        Line::from(Span::styled(
-            "────────────────────────────────────────────────────────",
-            Style::default().fg(palette.border_unfocused),
-        )),
-    ])
-    .alignment(Alignment::Center);
-    subtitle.render(chunks[2], buf);
+    // Direct, flat, spacious settings list (left-aligned)
+    let list_area = if show_full_ascii {
+        chunks[3]
+    } else {
+        chunks[2]
+    };
 
-    // 4 Settings Rows
-    let row_constraints = vec![
-        Constraint::Length(2),
-        Constraint::Length(2),
-        Constraint::Length(2),
-        Constraint::Length(2),
-    ];
-    let rows_chunks = Layout::default()
+    let row_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints(row_constraints)
-        .split(chunks[3]);
+        .constraints([
+            Constraint::Length(2), // Row 0
+            Constraint::Length(1), // Spacer
+            Constraint::Length(2), // Row 1
+            Constraint::Length(1), // Spacer
+            Constraint::Length(2), // Row 2
+            Constraint::Length(1), // Spacer
+            Constraint::Length(2), // Row 3
+        ])
+        .split(list_area);
 
-    let row_data: [(usize, &str, String); 4] = [
-        (0, "🎨 Theme Palette", state.theme.name().to_string()),
-        (1, "✏️  Editor Command", state.editor.display_name().to_string()),
-        (2, "📺 Render Quality", quality_label(state.quality).to_string()),
-        (3, "⚡ Render FPS", format!("{} FPS", state.fps)),
+    let row_data: [(usize, &str, String); TOTAL_SETTINGS_ROWS] = [
+        (0, "🎨  Theme Palette", state.theme.name().to_string()),
+        (1, "✏️   Editor Command", state.editor.display_name().to_string()),
+        (2, "📺  Render Quality", quality_label(state.quality).to_string()),
+        (3, "⚡  Render FPS", format!("{} FPS", state.fps)),
     ];
 
     for (row_idx, label, val) in row_data {
+        let chunk_idx = row_idx * 2;
+        if chunk_idx >= row_layout.len() {
+            break;
+        }
         let is_selected = state.selected_row == row_idx;
-        let r_area = rows_chunks[row_idx];
+        let r_area = row_layout[chunk_idx];
 
-        let prefix_indicator = if is_selected { " ❯ " } else { "   " };
-        let label_style = if is_selected {
-            Style::default()
-                .fg(palette.accent_mauve)
-                .add_modifier(Modifier::BOLD)
+        let (prefix, label_style) = if is_selected {
+            (
+                Span::styled(" ❯ ", Style::default().fg(palette.accent_mauve).add_modifier(Modifier::BOLD)),
+                Style::default().fg(palette.text_primary).add_modifier(Modifier::BOLD),
+            )
         } else {
-            Style::default().fg(palette.text_primary)
+            (
+                Span::styled("   ", Style::default()),
+                Style::default().fg(palette.text_dimmed),
+            )
         };
 
-        let val_spans = if is_selected {
-            vec![
-                Span::styled(" ◄ [ ", Style::default().fg(palette.accent_blue).add_modifier(Modifier::BOLD)),
+        let title_line = Line::from(vec![
+            prefix,
+            Span::styled(label, label_style),
+        ]);
+
+        let val_line = if is_selected {
+            Line::from(vec![
+                Span::styled("      ◄ [ ", Style::default().fg(palette.accent_mauve).add_modifier(Modifier::BOLD)),
                 Span::styled(
-                    val,
+                    format!(" {} ", val),
                     Style::default()
                         .fg(palette.bg_crust)
-                        .bg(palette.accent_blue)
+                        .bg(palette.accent_mauve)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" ] ► ", Style::default().fg(palette.accent_blue).add_modifier(Modifier::BOLD)),
-            ]
+                Span::styled(" ] ►", Style::default().fg(palette.accent_mauve).add_modifier(Modifier::BOLD)),
+                Span::styled("   (use ← / → to adjust)", Style::default().fg(palette.text_dimmed)),
+            ])
         } else {
-            vec![
-                Span::styled("   [ ", Style::default().fg(palette.text_dimmed)),
+            Line::from(vec![
+                Span::styled("        [ ", Style::default().fg(palette.text_dimmed)),
                 Span::styled(val, Style::default().fg(palette.text_muted)),
-                Span::styled(" ]   ", Style::default().fg(palette.text_dimmed)),
-            ]
+                Span::styled(" ]", Style::default().fg(palette.text_dimmed)),
+            ])
         };
 
-        let mut line_spans = vec![
-            Span::styled(
-                prefix_indicator,
-                Style::default()
-                    .fg(palette.border_focused)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("{:<22}", label), label_style),
-        ];
-        line_spans.extend(val_spans);
-
-        let row_p = Paragraph::new(Line::from(line_spans));
+        let row_p = Paragraph::new(vec![title_line, val_line]).alignment(Alignment::Left);
         row_p.render(r_area, buf);
     }
 
-    // Bottom Footer Hints
-    let footer = Paragraph::new(vec![
-        Line::from(Span::styled(
-            "────────────────────────────────────────────────────────",
-            Style::default().fg(palette.border_unfocused),
-        )),
-        Line::from(vec![
-            Span::styled("✦ Settings take effect immediately in real-time.", Style::default().fg(palette.success_sage).add_modifier(Modifier::BOLD)),
-        ]),
-    ])
-    .alignment(Alignment::Center);
-    footer.render(chunks[5], buf);
+    // Static, non-selectable hotkey reference footer
+    let footer_area = chunks[chunks.len() - 1];
+    let footer_line = Line::from(vec![
+        Span::styled(" ⌨  Quick Keys: ", Style::default().fg(palette.accent_mauve).add_modifier(Modifier::BOLD)),
+        Span::styled("↑/↓", Style::default().fg(palette.accent_blue).add_modifier(Modifier::BOLD)),
+        Span::styled(" Select  •  ", Style::default().fg(palette.text_dimmed)),
+        Span::styled("←/→", Style::default().fg(palette.accent_blue).add_modifier(Modifier::BOLD)),
+        Span::styled(" Change  •  ", Style::default().fg(palette.text_dimmed)),
+        Span::styled("Esc / ?", Style::default().fg(palette.accent_blue).add_modifier(Modifier::BOLD)),
+        Span::styled(" Close  •  ", Style::default().fg(palette.text_dimmed)),
+        Span::styled("F1", Style::default().fg(palette.accent_blue).add_modifier(Modifier::BOLD)),
+        Span::styled(" Code  •  ", Style::default().fg(palette.text_dimmed)),
+        Span::styled("F2", Style::default().fg(palette.accent_blue).add_modifier(Modifier::BOLD)),
+        Span::styled(" Preview  •  ", Style::default().fg(palette.text_dimmed)),
+        Span::styled("F3", Style::default().fg(palette.accent_blue).add_modifier(Modifier::BOLD)),
+        Span::styled(" Console  •  ", Style::default().fg(palette.text_dimmed)),
+        Span::styled("Ctrl+Q", Style::default().fg(palette.accent_blue).add_modifier(Modifier::BOLD)),
+        Span::styled(" Quit", Style::default().fg(palette.text_dimmed)),
+    ]);
+    let p_footer = Paragraph::new(footer_line).alignment(Alignment::Center);
+    p_footer.render(footer_area, buf);
 }
 
 #[cfg(test)]
@@ -440,21 +518,48 @@ mod tests {
         let action = settings.handle_key(key_right);
         assert_eq!(action, SettingsAction::ApplyFps(60));
 
-        // Test wrap down to 0
+        // Wrap around down from 3 to 0
         settings.handle_key(key_down);
         assert_eq!(settings.selected_row, 0);
 
-        // Test Escape closes settings
-        let key_esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
-        assert_eq!(settings.handle_key(key_esc), SettingsAction::Close);
+        // Wrap around up from 0 to 3
+        let key_up = KeyEvent::new(KeyCode::Up, KeyModifiers::empty());
+        settings.handle_key(key_up);
+        assert_eq!(settings.selected_row, 3);
 
-        // Test F4 closes settings
-        let key_f4 = KeyEvent::new(KeyCode::F(4), KeyModifiers::empty());
-        assert_eq!(settings.handle_key(key_f4), SettingsAction::Close);
+        // Direct Ctrl+Q triggers Quit
+        let key_ctrl_q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
+        assert_eq!(settings.handle_key(key_ctrl_q), SettingsAction::Quit);
 
-        // Test ? closes settings
-        let key_qmark = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::empty());
-        assert_eq!(settings.handle_key(key_qmark), SettingsAction::Close);
+        // Direct F-key press tests
+        assert_eq!(
+            settings.handle_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::empty())),
+            SettingsAction::FocusPane(FocusPane::Editor)
+        );
+        assert_eq!(
+            settings.handle_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::empty())),
+            SettingsAction::FocusPane(FocusPane::Preview)
+        );
+        assert_eq!(
+            settings.handle_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::empty())),
+            SettingsAction::FocusPane(FocusPane::Console)
+        );
+        assert_eq!(
+            settings.handle_key(KeyEvent::new(KeyCode::F(5), KeyModifiers::empty())),
+            SettingsAction::TriggerRebuild
+        );
+        assert_eq!(
+            settings.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::empty())),
+            SettingsAction::OpenScenes
+        );
+        assert_eq!(
+            settings.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty())),
+            SettingsAction::Close
+        );
+        assert_eq!(
+            settings.handle_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::empty())),
+            SettingsAction::Close
+        );
     }
 
     #[test]

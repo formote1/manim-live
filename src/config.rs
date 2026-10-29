@@ -64,16 +64,6 @@ impl SettingsStore {
     pub fn parse_json(content: &str) -> Self {
         let mut store = Self::default();
 
-        let files_re = match Regex::new(r#""files"\s*:\s*\{([\s\S]*?)\}\s*\}?"#) {
-            Ok(r) => r,
-            Err(_) => return store,
-        };
-
-        let block_re = match Regex::new(r#""((?:[^"\\]|\\.)+)"\s*:\s*\{([^}]+)\}"#) {
-            Ok(r) => r,
-            Err(_) => return store,
-        };
-
         let qual_re = match Regex::new(r#""quality"\s*:\s*"([^"]+)""#) {
             Ok(r) => r,
             Err(_) => return store,
@@ -84,35 +74,69 @@ impl SettingsStore {
             Err(_) => return store,
         };
 
-        let files_body = if let Some(caps) = files_re.captures(content) {
-            caps.get(1).map(|m| m.as_str()).unwrap_or("")
-        } else {
-            content
+        let key_re = match Regex::new(r#""((?:[^"\\]|\\.)+)""#) {
+            Ok(r) => r,
+            Err(_) => return store,
         };
 
-        for block in block_re.captures_iter(files_body) {
-            if let Some(key_raw) = block.get(1) {
-                let inner = block.get(2).map(|m| m.as_str()).unwrap_or("");
-                let quality = qual_re
-                    .captures(inner)
-                    .and_then(|c| c.get(1))
-                    .map(|m| match m.as_str().to_lowercase().as_str() {
-                        "m" | "medium" | "med" => Quality::Medium,
-                        "h" | "high" => Quality::High,
-                        "k" | "4k" | "fourk" => Quality::FourK,
-                        _ => Quality::Low,
-                    })
-                    .unwrap_or(Quality::Low);
+        let files_idx = match content.find(r#""files""#) {
+            Some(i) => i,
+            None => return store,
+        };
+        let open_brace = match content[files_idx..].find('{') {
+            Some(i) => files_idx + i,
+            None => return store,
+        };
 
-                let fps = fps_re
-                    .captures(inner)
-                    .and_then(|c| c.get(1))
-                    .and_then(|m| m.as_str().parse::<u32>().ok())
-                    .unwrap_or(30)
-                    .clamp(1, 120);
+        let body = &content[open_brace + 1..];
+        let mut depth = 0;
+        let mut start_idx = None;
+        let mut last_header_start = 0;
+        let mut header = "";
 
-                let key = key_raw.as_str().replace(r#"\""#, "\"").replace(r#"\\"#, "\\");
-                store.files.insert(key, AnimationSettings { quality, fps });
+        for (i, ch) in body.char_indices() {
+            if ch == '{' {
+                if depth == 0 {
+                    start_idx = Some(i);
+                    header = &body[last_header_start..i];
+                }
+                depth += 1;
+            } else if ch == '}' {
+                if depth == 1 {
+                    if let Some(start) = start_idx {
+                        let inner = &body[start + 1..i];
+                        if let Some(caps) = key_re.captures_iter(header).last() {
+                            if let Some(key_raw) = caps.get(1) {
+                                let key = key_raw.as_str().replace(r#"\""#, "\"").replace(r#"\\"#, "\\");
+                                let quality = qual_re
+                                    .captures(inner)
+                                    .and_then(|c| c.get(1))
+                                    .map(|m| match m.as_str().to_lowercase().as_str() {
+                                        "m" | "medium" | "med" => Quality::Medium,
+                                        "h" | "high" => Quality::High,
+                                        "k" | "4k" | "fourk" => Quality::FourK,
+                                        _ => Quality::Low,
+                                    })
+                                    .unwrap_or(Quality::Low);
+
+                                let fps = fps_re
+                                    .captures(inner)
+                                    .and_then(|c| c.get(1))
+                                    .and_then(|m| m.as_str().parse::<u32>().ok())
+                                    .unwrap_or(30)
+                                    .clamp(1, 120);
+
+                                store.files.insert(key, AnimationSettings { quality, fps });
+                            }
+                        }
+                    }
+                    last_header_start = i + 1;
+                }
+                if depth > 0 {
+                    depth -= 1;
+                } else {
+                    break;
+                }
             }
         }
 
@@ -234,5 +258,43 @@ mod tests {
         let store = SettingsStore::default();
         let path = Path::new("/never/seen/before/scene.py");
         assert_eq!(store.get_for_file(path), None);
+    }
+
+    #[test]
+    fn test_corrupted_json_recovery() {
+        let corrupted = "{ this is not valid json at all! {[[";
+        let parsed = SettingsStore::parse_json(corrupted);
+        assert!(parsed.files.is_empty());
+    }
+
+    #[test]
+    fn test_fps_clamping_and_quality_parsing() {
+        let json = r#"{
+  "files": {
+    "/scene_a.py": {
+      "quality": "4K",
+      "fps": 500
+    },
+    "/scene_b.py": {
+      "quality": "Low",
+      "fps": 0
+    }
+  }
+}"#;
+        let parsed = SettingsStore::parse_json(json);
+        assert_eq!(
+            parsed.files.get("/scene_a.py"),
+            Some(&AnimationSettings {
+                quality: Quality::FourK,
+                fps: 120 // clamped to 120
+            })
+        );
+        assert_eq!(
+            parsed.files.get("/scene_b.py"),
+            Some(&AnimationSettings {
+                quality: Quality::Low,
+                fps: 1 // clamped to 1
+            })
+        );
     }
 }

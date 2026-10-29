@@ -37,6 +37,10 @@ pub struct PreviewState {
     // Timeline metrics
     pub is_scrubbing: bool,
     pub force_redraw: bool,
+    pub is_fullscreen: bool,
+    pub last_hud_area: Option<Rect>,
+    pub last_scrub_track: Option<(u16, u16)>,
+    pub last_fullscreen_btn_area: Option<Rect>,
     cached_frame_path: Option<PathBuf>,
     cached_image: Option<DynamicImage>,
     last_rendered_area: Option<Rect>,
@@ -63,6 +67,10 @@ impl PreviewState {
             frame_guard: None,
             is_scrubbing: false,
             force_redraw: false,
+            is_fullscreen: false,
+            last_hud_area: None,
+            last_scrub_track: None,
+            last_fullscreen_btn_area: None,
 
             cached_frame_path: None,
             cached_image: None,
@@ -163,6 +171,17 @@ impl PreviewState {
             self.is_playing = false;
             self.is_scrubbing = true;
             self.current_frame_idx = self.frames.len().saturating_sub(1);
+            self.force_redraw = true;
+        }
+    }
+
+    pub fn seek_ratio(&mut self, ratio: f64) {
+        if !self.frames.is_empty() {
+            self.is_playing = false;
+            self.is_scrubbing = true;
+            let total = self.frames.len();
+            let target = ((total.saturating_sub(1)) as f64 * ratio.clamp(0.0, 1.0)).round() as usize;
+            self.current_frame_idx = target.min(total - 1);
             self.force_redraw = true;
         }
     }
@@ -311,7 +330,7 @@ impl PreviewState {
                     )),
                     Line::from(""),
                     Line::from(Span::styled(
-                        "Saving python file in editor (Ctrl+S) renders snapshot (-s)",
+                        "Saving python file in editor (Ctrl+S) automatically renders scene",
                         Style::default().fg(palette.text_muted),
                     )),
                 ]
@@ -323,6 +342,16 @@ impl PreviewState {
 
         if inner_area.width < 2 || inner_area.height < 2 {
             return;
+        }
+
+        // Explicitly clear all cells in inner_area so no previous compilation text or lingering messages remain
+        for r in 0..inner_area.height {
+            for c in 0..inner_area.width {
+                if let Some(cell) = buf.cell_mut((inner_area.x + c, inner_area.y + r)) {
+                    cell.set_symbol(" ");
+                    cell.set_style(Style::default().bg(palette.bg_dark));
+                }
+            }
         }
 
         // Layout: Reserve 2 rows at the bottom of inner_area for Timeline HUD when frames exist
@@ -343,15 +372,38 @@ impl PreviewState {
             }
         }
 
+        let fs_btn_text = if self.is_fullscreen {
+            " [ 🗗 Restore ] "
+        } else {
+            " [ ⛶ Fullscreen ] "
+        };
+        let fs_btn_w = fs_btn_text.chars().count() as u16;
+
         // Render interactive timeline scrubber HUD
         if let Some(hud) = hud_area {
+            self.last_hud_area = Some(hud);
             let total_frames = self.frames.len();
             let current_idx = self.current_frame_idx;
             let fps = self.fps.max(1) as f64;
             let cur_secs = current_idx as f64 / fps;
             let total_secs = total_frames as f64 / fps;
 
-            let track_width = (hud.width as usize).saturating_sub(44).max(10);
+            let cur_time_str = format!("{:02}:{:05.2} ", (cur_secs / 60.0).floor() as u32, cur_secs % 60.0);
+            let total_time_str = format!("{:02}:{:05.2} ", (total_secs / 60.0).floor() as u32, total_secs % 60.0);
+            let frame_counter = format!("(F:{}/{})", current_idx + 1, total_frames);
+
+            let speed_badge = if (self.playback_speed - 1.0).abs() > 0.01 {
+                format!(" [{:.1}x]", self.playback_speed)
+            } else {
+                String::new()
+            };
+
+            // Calculate track coordinates taking into account labels and fullscreen button
+            let track_start_x = hud.x + cur_time_str.len() as u16 + 2;
+            let right_reserved = total_time_str.len() + frame_counter.len() + speed_badge.len() + fs_btn_w as usize + 6;
+            let track_width = (hud.width as usize).saturating_sub(cur_time_str.len() + 2 + right_reserved).max(8);
+            self.last_scrub_track = Some((track_start_x, track_width as u16));
+
             let progress_ratio = if total_frames > 1 {
                 current_idx as f64 / (total_frames - 1) as f64
             } else {
@@ -370,38 +422,51 @@ impl PreviewState {
                 }
             }
 
-            let speed_badge = if (self.playback_speed - 1.0).abs() > 0.01 {
-                format!(" [{:.1}x]", self.playback_speed)
-            } else {
-                String::new()
-            };
-
-            let hud_line = Line::from(vec![
-                Span::styled(
-                    format!("{:02}:{:05.2} ", (cur_secs / 60.0).floor() as u32, cur_secs % 60.0),
-                    Style::default().fg(palette.accent_blue).add_modifier(Modifier::BOLD),
-                ),
+            let hud_spans = vec![
+                Span::styled(cur_time_str, Style::default().fg(palette.accent_blue).add_modifier(Modifier::BOLD)),
                 Span::styled("[ ", Style::default().fg(palette.text_dimmed)),
                 Span::styled(track_bar, Style::default().fg(palette.accent_mauve)),
                 Span::styled(" ] ", Style::default().fg(palette.text_dimmed)),
-                Span::styled(
-                    format!("{:02}:{:05.2} ", (total_secs / 60.0).floor() as u32, total_secs % 60.0),
-                    Style::default().fg(palette.text_muted),
-                ),
-                Span::styled(
-                    format!("(F:{}/{})", current_idx + 1, total_frames),
-                    Style::default().fg(palette.text_dimmed),
-                ),
+                Span::styled(total_time_str, Style::default().fg(palette.text_muted)),
+                Span::styled(frame_counter, Style::default().fg(palette.text_dimmed)),
                 Span::styled(speed_badge, Style::default().fg(palette.warn_peach).add_modifier(Modifier::BOLD)),
-            ]);
+            ];
 
             // Top row of HUD is subtle divider line
             let sep_line = Line::from(Span::styled("─".repeat(hud.width as usize), Style::default().fg(palette.border_unfocused)));
             let p_sep = Paragraph::new(sep_line);
             p_sep.render(Rect::new(hud.x, hud.y, hud.width, 1), buf);
 
-            let p_hud = Paragraph::new(hud_line).alignment(Alignment::Center);
-            p_hud.render(Rect::new(hud.x, hud.y + 1, hud.width, 1), buf);
+            let hud_left_w = hud.width.saturating_sub(fs_btn_w + 1);
+            let p_hud = Paragraph::new(Line::from(hud_spans)).alignment(Alignment::Left);
+            p_hud.render(Rect::new(hud.x, hud.y + 1, hud_left_w, 1), buf);
+
+            // Fullscreen icon button at bottom right
+            if hud.width >= fs_btn_w + 10 {
+                let btn_rect = Rect::new(hud.right().saturating_sub(fs_btn_w), hud.y + 1, fs_btn_w, 1);
+                self.last_fullscreen_btn_area = Some(btn_rect);
+                let p_fs = Paragraph::new(Span::styled(
+                    fs_btn_text,
+                    Style::default().fg(palette.accent_blue).add_modifier(Modifier::BOLD),
+                ));
+                p_fs.render(btn_rect, buf);
+            } else {
+                self.last_fullscreen_btn_area = None;
+            }
+        } else {
+            self.last_hud_area = None;
+            self.last_scrub_track = None;
+            if inner_area.width >= fs_btn_w + 2 && inner_area.height >= 2 {
+                let btn_rect = Rect::new(inner_area.right().saturating_sub(fs_btn_w + 1), inner_area.bottom().saturating_sub(1), fs_btn_w, 1);
+                self.last_fullscreen_btn_area = Some(btn_rect);
+                let p_fs = Paragraph::new(Span::styled(
+                    fs_btn_text,
+                    Style::default().fg(palette.accent_blue).add_modifier(Modifier::BOLD),
+                ));
+                p_fs.render(btn_rect, buf);
+            } else {
+                self.last_fullscreen_btn_area = None;
+            }
         }
 
         self.last_rendered_area = Some(inner_area);
@@ -548,23 +613,20 @@ impl PreviewState {
             }
         }
 
-        // Ratatui cell skipping & buffer protection:
-        // Mark all cells covered by the kitty image as skipped so ratatui diffing doesn't repaint spaces over GPU image
-        for r in 0..fit_rows {
-            for c in 0..fit_cols {
-                let screen_x = fit_x + c;
-                let screen_y = fit_y + r;
-                if let Some(cell) = buf.cell_mut((screen_x, screen_y)) {
-                    cell.set_diff_option(ratatui::buffer::CellDiffOption::Skip);
-                }
-            }
-        }
+        // Diffing note: leaving cells with normal diff allows Ratatui to wipe
+        // any previous compilation text messages from the screen upon frame arrival.
     }
 }
 
 pub fn clear_kitty_images() {
     let mut out = stdout();
     let _ = write!(out, "\x1b_Ga=d,d=a,q=2\x1b\\");
+    let _ = out.flush();
+}
+
+pub fn clear_kitty_image_id(id: u32) {
+    let mut out = stdout();
+    let _ = write!(out, "\x1b_Ga=d,d=i,i={},q=2\x1b\\", id);
     let _ = out.flush();
 }
 
@@ -589,10 +651,10 @@ fn emit_kitty_image_path(
     // i=1: image id
     // q=2: quiet mode
     // C=1: do not move cursor
-    // z=-1: render behind text for clean modal overlays
+    // z=1: render in front of text cells so previous text overlay is never visible
     write!(
         out,
-        "\x1b_Ga=T,f=100,t=f,i=1,q=2,C=1,z=-1,c={},r={};{}\x1b\\",
+        "\x1b_Ga=T,f=100,t=f,i=1,q=2,C=1,z=1,c={},r={};{}\x1b\\",
         cols, rows, b64_path
     )?;
     out.flush()
@@ -617,7 +679,12 @@ pub fn detect_cell_aspect_ratio() -> f64 {
     2.25
 }
 
-fn detect_terminal_protocol() -> ImageProtocol {
+#[allow(dead_code)]
+pub fn is_kitty_supported() -> bool {
+    detect_terminal_protocol() == ImageProtocol::Kitty
+}
+
+pub fn detect_terminal_protocol() -> ImageProtocol {
     if let Ok(v) = std::env::var("KITTY_WINDOW_ID") {
         if !v.is_empty() {
             return ImageProtocol::Kitty;
@@ -649,3 +716,72 @@ fn detect_terminal_protocol() -> ImageProtocol {
     // Default to universal Unicode half-blocks
     ImageProtocol::Halfblocks
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::theme::ThemeId;
+
+    #[test]
+    fn test_preview_buffer_cleared_on_frame_arrival() {
+        let palette = ThemeId::CatppuccinMocha.palette();
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        let mut state = PreviewState::new(Some("kitty"), 30);
+
+        // Step 1: Compiling with no frames -> displays compilation message
+        state.render(area, &mut buf, true, true, BorderType::Rounded, &palette);
+        let mut content_compiling = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(c) = buf.cell((x, y)) {
+                    content_compiling.push_str(c.symbol());
+                }
+            }
+        }
+        assert!(content_compiling.contains("Compiling Scene"));
+        assert!(content_compiling.contains("Live playback will begin"));
+
+        // Step 2: Frames arrive (simulate temp frame)
+        let temp_dir = tempfile::tempdir().unwrap();
+        let frame_path = temp_dir.path().join("frame_000.png");
+        // Create 1x1 png image
+        let img = image::RgbaImage::new(16, 9);
+        img.save(&frame_path).unwrap();
+
+        state.set_frames(vec![frame_path]);
+        assert_eq!(state.frames.len(), 1);
+
+        // Render again -> inner buffer must NOT contain compilation message
+        state.render(area, &mut buf, true, false, BorderType::Rounded, &palette);
+        let mut content_playback = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(c) = buf.cell((x, y)) {
+                    content_playback.push_str(c.symbol());
+                }
+            }
+        }
+        assert!(!content_playback.contains("Compiling Scene"));
+        assert!(!content_playback.contains("Live playback will begin"));
+    }
+
+    #[test]
+    fn test_seek_ratio() {
+        let mut state = PreviewState::new(Some("halfblocks"), 30);
+        state.frames = vec![
+            PathBuf::from("frame0.png"),
+            PathBuf::from("frame1.png"),
+            PathBuf::from("frame2.png"),
+            PathBuf::from("frame3.png"),
+            PathBuf::from("frame4.png"),
+        ];
+        state.seek_ratio(0.0);
+        assert_eq!(state.current_frame_idx, 0);
+        state.seek_ratio(0.5);
+        assert_eq!(state.current_frame_idx, 2);
+        state.seek_ratio(1.0);
+        assert_eq!(state.current_frame_idx, 4);
+    }
+}
+

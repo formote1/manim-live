@@ -114,6 +114,8 @@ pub struct App {
     pub scene_palette: ScenePaletteState,
     /// Active theme color palette
     pub palette: ThemePalette,
+    /// Whether the preview pane is currently expanded to fullscreen
+    pub is_preview_fullscreen: bool,
     /// Last known cursor position inside the editor pane
     pub last_cursor_pos: Option<(u16, u16)>,
 }
@@ -163,6 +165,7 @@ impl App {
             is_settings_open: false,
             scene_palette: ScenePaletteState::new(),
             palette,
+            is_preview_fullscreen: false,
             last_cursor_pos: None,
         })
     }
@@ -195,9 +198,14 @@ impl App {
         }
         Ok(())
     }
+
+    pub fn save_settings(&self) {
+        let mut store = crate::config::SettingsStore::load();
+        let _ = store.set_for_file(&self.config.file_path, self.config.quality, self.config.fps);
+    }
 }
 
-fn apply_backdrop_blur(buf: &mut Buffer) {
+fn apply_backdrop_blur(buf: &mut Buffer, focused_area: Option<Rect>) {
     let dim_rgb = |r: u8, g: u8, b: u8, factor: f32, tint: (u8, u8, u8)| -> (u8, u8, u8) {
         let nr = ((r as f32 * factor) + (tint.0 as f32 * (1.0 - factor))) as u8;
         let ng = ((g as f32 * factor) + (tint.1 as f32 * (1.0 - factor))) as u8;
@@ -222,20 +230,34 @@ fn apply_backdrop_blur(buf: &mut Buffer) {
                 ratatui::style::Color::Rgb(tint.0, tint.1, tint.2)
             }
             ratatui::style::Color::White | ratatui::style::Color::Gray => {
-                ratatui::style::Color::Rgb(55, 60, 70)
+                let (nr, ng, nb) = dim_rgb(180, 180, 180, factor, tint);
+                ratatui::style::Color::Rgb(nr, ng, nb)
             }
             _ => ratatui::style::Color::DarkGray,
         }
     };
 
-    let tint = (10, 12, 18);
+    let tint = (15, 17, 26);
     let area = *buf.area();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
+            let is_inside_focus = if let Some(f) = focused_area {
+                x >= f.left() && x < f.right() && y >= f.top() && y < f.bottom()
+            } else {
+                false
+            };
+
             if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.fg = dim_color(cell.fg, 0.25, tint);
-                cell.bg = dim_color(cell.bg, 0.15, tint);
-                cell.modifier.insert(ratatui::style::Modifier::DIM);
+                if is_inside_focus {
+                    // Inside focused section: a bit more blurry / darker tint so background image is suppressed
+                    cell.fg = dim_color(cell.fg, 0.15, tint);
+                    cell.bg = dim_color(cell.bg, 0.10, tint);
+                    cell.modifier.insert(ratatui::style::Modifier::DIM);
+                } else {
+                    // Surroundings: less blurry so surroundings remain visible
+                    cell.fg = dim_color(cell.fg, 0.70, tint);
+                    cell.bg = dim_color(cell.bg, 0.55, tint);
+                }
             }
         }
     }
@@ -326,11 +348,15 @@ impl App {
             // Render TUI only when state is dirty
             if needs_redraw {
                 let term_size = terminal.size().map_err(|e| anyhow::anyhow!("Terminal size error: {e}"))?;
-                let layout = AppLayout::compute_with_splits(
-                    Rect::new(0, 0, term_size.width, term_size.height),
-                    self.h_split,
-                    self.v_split,
-                );
+                let layout = if self.is_preview_fullscreen {
+                    AppLayout::compute_fullscreen_preview(Rect::new(0, 0, term_size.width, term_size.height))
+                } else {
+                    AppLayout::compute_with_splits(
+                        Rect::new(0, 0, term_size.width, term_size.height),
+                        self.h_split,
+                        self.v_split,
+                    )
+                };
                 self.last_editor_area = layout.editor_area;
                 self.last_preview_area = layout.preview_area;
                 self.last_console_area = layout.console_area;
@@ -353,36 +379,42 @@ impl App {
                 };
 
                 let editor_focused = self.focus == FocusPane::Editor && !self.is_settings_open && !self.scene_palette.is_open;
-                let preview_focused = self.focus == FocusPane::Preview && !self.is_settings_open && !self.scene_palette.is_open;
+                let preview_focused = (self.focus == FocusPane::Preview || self.is_preview_fullscreen) && !self.is_settings_open && !self.scene_palette.is_open;
                 let console_focused = self.focus == FocusPane::Console && !self.is_settings_open && !self.scene_palette.is_open;
 
                 terminal.draw(|frame| {
-                    let layout = AppLayout::compute_with_splits(frame.area(), self.h_split, self.v_split);
+                    let layout = if self.is_preview_fullscreen {
+                        AppLayout::compute_fullscreen_preview(frame.area())
+                    } else {
+                        AppLayout::compute_with_splits(frame.area(), self.h_split, self.v_split)
+                    };
 
-                    // 1. Editor Pane
-                    let editor_border = if editor_focused { border_type_focused } else { border_type_unfocused };
-                    let breadcrumb = format_breadcrumb(&self.config.file_path, self.config.scene_name.as_deref());
-                    let editor_inner = render_editor_container(
-                        layout.editor_area,
-                        frame.buffer_mut(),
-                        &breadcrumb,
-                        editor_focused,
-                        editor_border,
-                        &self.palette,
-                    );
-                    recorded_editor_inner = Some(editor_inner);
+                    // 1. Editor Pane (skipped when in fullscreen preview)
+                    if !self.is_preview_fullscreen && layout.editor_area.width >= 5 {
+                        let editor_border = if editor_focused { border_type_focused } else { border_type_unfocused };
+                        let breadcrumb = format_breadcrumb(&self.config.file_path, self.config.scene_name.as_deref());
+                        let editor_inner = render_editor_container(
+                            layout.editor_area,
+                            frame.buffer_mut(),
+                            &breadcrumb,
+                            editor_focused,
+                            editor_border,
+                            &self.palette,
+                        );
+                        recorded_editor_inner = Some(editor_inner);
 
-                    if let Some(ref mut pty) = self.pty {
-                        if editor_inner.width >= 10 && editor_inner.height >= 5 {
-                            let cur_size = (editor_inner.width, editor_inner.height);
-                            if self.last_editor_size != cur_size {
-                                pty.resize(editor_inner.width, editor_inner.height);
-                                self.last_editor_size = cur_size;
+                        if let Some(ref mut pty) = self.pty {
+                            if editor_inner.width >= 10 && editor_inner.height >= 5 {
+                                let cur_size = (editor_inner.width, editor_inner.height);
+                                if self.last_editor_size != cur_size {
+                                    pty.resize(editor_inner.width, editor_inner.height);
+                                    self.last_editor_size = cur_size;
+                                }
                             }
-                        }
-                        let pty_cursor = pty.render_to_buffer(editor_inner, frame.buffer_mut());
-                        if editor_focused {
-                            cursor_pos = pty_cursor;
+                            let pty_cursor = pty.render_to_buffer(editor_inner, frame.buffer_mut());
+                            if editor_focused {
+                                cursor_pos = pty_cursor;
+                            }
                         }
                     }
 
@@ -391,6 +423,7 @@ impl App {
                     let preview_border = if preview_focused { border_type_focused } else { border_type_unfocused };
                     let is_building = matches!(self.console_state.build_state, BuildState::Building { .. });
                     if !self.is_settings_open && !self.scene_palette.is_open {
+                        self.preview_state.is_fullscreen = self.is_preview_fullscreen;
                         self.preview_state.render(
                             layout.preview_area,
                             frame.buffer_mut(),
@@ -418,15 +451,17 @@ impl App {
                         }
                     }
 
-                    // 3. Console Pane
-                    let console_border = if console_focused { border_type_focused } else { border_type_unfocused };
-                    self.console_state.render(
-                        layout.console_area,
-                        frame.buffer_mut(),
-                        console_focused,
-                        console_border,
-                        &self.palette,
-                    );
+                    // 3. Console Pane (skipped when in fullscreen preview)
+                    if !self.is_preview_fullscreen && layout.console_area.height >= 2 {
+                        let console_border = if console_focused { border_type_focused } else { border_type_unfocused };
+                        self.console_state.render(
+                            layout.console_area,
+                            frame.buffer_mut(),
+                            console_focused,
+                            console_border,
+                            &self.palette,
+                        );
+                    }
 
                     // 4. Status Bar
                     let quality_label = quality_label(self.config.quality);
@@ -442,7 +477,8 @@ impl App {
 
                     // 5. Settings App Overlay (if open)
                     if self.is_settings_open {
-                        apply_backdrop_blur(frame.buffer_mut());
+                        let modal_area = crate::ui::settings::calculate_modal_area(frame.area());
+                        apply_backdrop_blur(frame.buffer_mut(), Some(modal_area));
                         render_settings_overlay(
                             &self.settings_state,
                             frame.area(),
@@ -450,7 +486,12 @@ impl App {
                             &self.palette,
                         );
                     } else if self.scene_palette.is_open {
-                        apply_backdrop_blur(frame.buffer_mut());
+                        let palette_w = 60.min(frame.area().width.saturating_sub(4));
+                        let palette_h = 16.min(frame.area().height.saturating_sub(4));
+                        let off_x = (frame.area().width.saturating_sub(palette_w)) / 2;
+                        let off_y = (frame.area().height.saturating_sub(palette_h)) / 2;
+                        let palette_area = Rect::new(frame.area().x + off_x, frame.area().y + off_y, palette_w, palette_h);
+                        apply_backdrop_blur(frame.buffer_mut(), Some(palette_area));
                         render_scene_palette_overlay(
                             &self.scene_palette,
                             self.config.scene_name.as_deref(),
@@ -599,7 +640,13 @@ impl App {
                 SettingsAction::None => {}
                 SettingsAction::Close => {
                     self.is_settings_open = false;
+                    crate::ui::settings::clear_settings_logo();
                     self.preview_state.force_redraw = true;
+                }
+                SettingsAction::Quit => {
+                    self.is_settings_open = false;
+                    crate::ui::settings::clear_settings_logo();
+                    self.should_quit = true;
                 }
                 SettingsAction::ApplyTheme(theme_id) => {
                     self.palette = theme_id.palette();
@@ -609,14 +656,51 @@ impl App {
                 }
                 SettingsAction::ApplyQuality(q) => {
                     self.config.quality = q;
-                    self.trigger_rebuild();
+                    self.save_settings();
+                    self.preview_state.force_redraw = true;
                 }
                 SettingsAction::ApplyFps(fps) => {
                     self.config.fps = fps;
                     self.preview_state.fps = fps;
+                    self.save_settings();
+                    self.preview_state.force_redraw = true;
+                }
+                SettingsAction::FocusPane(target) => {
+                    self.is_settings_open = false;
+                    crate::ui::settings::clear_settings_logo();
+                    self.focus = target;
+                    self.preview_state.force_redraw = true;
+                }
+                SettingsAction::TriggerRebuild => {
+                    self.is_settings_open = false;
+                    crate::ui::settings::clear_settings_logo();
+                    self.preview_state.force_redraw = true;
+                    self.console_state.add_line("─── Triggering manual rebuild (F5 full video) ───".to_string());
                     self.trigger_rebuild();
                 }
+                SettingsAction::OpenScenes => {
+                    self.is_settings_open = false;
+                    crate::ui::settings::clear_settings_logo();
+                    let discovered = crate::ui::console::detect_all_scenes(&self.config.file_path);
+                    let active = self.config.scene_name.as_deref();
+                    let sel = discovered.iter().position(|s| Some(s.as_str()) == active).unwrap_or(0);
+                    self.scene_palette.available_scenes = discovered;
+                    self.scene_palette.selected_idx = sel;
+                    self.scene_palette.search_query.clear();
+                    self.scene_palette.is_open = true;
+                    clear_kitty_images();
+                }
             }
+            return Ok(());
+        }
+
+        // If preview is currently fullscreen, Esc / f / F / F11 restores the normal layout
+        if self.is_preview_fullscreen
+            && matches!(key.code, KeyCode::Esc | KeyCode::Char('f') | KeyCode::Char('F') | KeyCode::F(11))
+        {
+            self.is_preview_fullscreen = false;
+            clear_kitty_images();
+            self.preview_state.force_redraw = true;
             return Ok(());
         }
 
@@ -626,6 +710,7 @@ impl App {
             if self.is_settings_open {
                 clear_kitty_images();
             } else {
+                crate::ui::settings::clear_settings_logo();
                 self.preview_state.force_redraw = true;
             }
             return Ok(());
@@ -763,6 +848,11 @@ impl App {
                     }
 
                     // Build actions
+                    KeyCode::Char('f') | KeyCode::Char('F') | KeyCode::F(11) => {
+                        self.is_preview_fullscreen = !self.is_preview_fullscreen;
+                        clear_kitty_images();
+                        self.preview_state.force_redraw = true;
+                    }
                     KeyCode::Char('r') | KeyCode::Char('R') | KeyCode::F(5) => {
                         self.console_state.add_line("─── Triggering manual rebuild (full video) ───".to_string());
                         self.trigger_rebuild();
@@ -864,11 +954,13 @@ impl App {
                             ConsoleAction::SetQuality(q) => {
                                 self.config.quality = q;
                                 self.settings_state.quality = q;
+                                self.save_settings();
                             }
                             ConsoleAction::SetFps(fps) => {
                                 self.config.fps = fps;
                                 self.settings_state.fps = fps;
                                 self.preview_state.fps = fps;
+                                self.save_settings();
                             }
                             ConsoleAction::SetQualityAndFps(q, fps) => {
                                 self.config.quality = q;
@@ -876,6 +968,7 @@ impl App {
                                 self.config.fps = fps;
                                 self.settings_state.fps = fps;
                                 self.preview_state.fps = fps;
+                                self.save_settings();
                             }
                             ConsoleAction::TogglePlay => {
                                 self.preview_state.toggle_play();
@@ -932,6 +1025,8 @@ impl App {
 
             MouseEventKind::Up(_) => {
                 if self.drag_target.take().is_some() {
+                    clear_kitty_images();
+                    self.preview_state.force_redraw = true;
                     return Ok(());
                 }
             }
@@ -944,18 +1039,22 @@ impl App {
                         DragTarget::HSep => {
                             if term_w > 0 {
                                 let new_split = (col as f64) / (term_w as f64);
-                                self.h_split = new_split.clamp(H_SPLIT_MIN, H_SPLIT_MAX);
-                                clear_kitty_images();
-                                self.preview_state.force_redraw = true;
+                                let clamped = new_split.clamp(H_SPLIT_MIN, H_SPLIT_MAX);
+                                if (clamped - self.h_split).abs() >= 0.005 {
+                                    self.h_split = clamped;
+                                    self.preview_state.force_redraw = true;
+                                }
                             }
                         }
                         DragTarget::VSep => {
                             if right_h > 0 {
                                 let row_rel = row.saturating_sub(self.last_preview_area.y);
                                 let new_split = (row_rel as f64) / (right_h as f64);
-                                self.v_split = new_split.clamp(V_SPLIT_MIN, V_SPLIT_MAX);
-                                clear_kitty_images();
-                                self.preview_state.force_redraw = true;
+                                let clamped = new_split.clamp(V_SPLIT_MIN, V_SPLIT_MAX);
+                                if (clamped - self.v_split).abs() >= 0.005 {
+                                    self.v_split = clamped;
+                                    self.preview_state.force_redraw = true;
+                                }
                             }
                         }
                     }
@@ -1010,10 +1109,48 @@ impl App {
             }
         } else if in_editor_area && is_click {
             self.focus = FocusPane::Editor;
-        } else if in_preview_area {
+        } else if in_preview_area || self.is_preview_fullscreen {
             if is_click {
                 self.focus = FocusPane::Preview;
             }
+
+            // 1. Check click on Fullscreen button
+            if let Some(btn_rect) = self.preview_state.last_fullscreen_btn_area {
+                if col >= btn_rect.x
+                    && col < btn_rect.right()
+                    && row >= btn_rect.y
+                    && row < btn_rect.bottom()
+                    && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                {
+                    self.is_preview_fullscreen = !self.is_preview_fullscreen;
+                    clear_kitty_images();
+                    self.preview_state.force_redraw = true;
+                    return Ok(());
+                }
+            }
+
+            // 2. Check click or drag on interactive Timeline Scrubber
+            if let Some(hud) = self.preview_state.last_hud_area {
+                let scrub_row = hud.bottom().saturating_sub(1);
+                if (row == scrub_row || row == hud.y)
+                    && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left))
+                {
+                    if let Some((track_x, track_w)) = self.preview_state.last_scrub_track {
+                        if col >= track_x && col < track_x + track_w && track_w > 0 {
+                            let ratio = (col.saturating_sub(track_x) as f64) / (track_w as f64);
+                            self.preview_state.seek_ratio(ratio);
+                            return Ok(());
+                        } else if col < track_x && col >= hud.x {
+                            self.preview_state.seek_ratio(0.0);
+                            return Ok(());
+                        } else if col >= track_x + track_w && col < hud.right().saturating_sub(18) {
+                            self.preview_state.seek_ratio(1.0);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+
             match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
                     self.preview_state.toggle_play();

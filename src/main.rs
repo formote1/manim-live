@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod pty;
 mod runner;
 mod ui;
@@ -51,16 +52,16 @@ pub struct Cli {
     pub editor: Option<String>,
 
     /// Manim quality profile (low, medium, high, 4k)
-    #[arg(short, long, default_value = "low")]
-    pub quality: String,
+    #[arg(short, long)]
+    pub quality: Option<String>,
 
     /// Legacy format option (hidden; manim-live renders full animation video)
     #[arg(short, long, default_value = "mp4", hide = true)]
     pub format: String,
 
     /// Frame rate cap for live previews
-    #[arg(long, default_value_t = 30)]
-    pub fps: u32,
+    #[arg(long)]
+    pub fps: Option<u32>,
 
     /// Terminal image protocol (auto, kitty, halfblocks)
     #[arg(long, default_value = "auto")]
@@ -141,12 +142,33 @@ fn main() -> Result<()> {
     // Resolve editor command
     let editor_cmd = resolve_editor(cli.editor.as_deref());
 
-    // Parse quality (capped to Medium / 720p MAX for live preview)
-    let quality = match cli.quality.to_lowercase().as_str() {
-        "m" | "medium" | "med" => Quality::Medium,
-        "h" | "high" | "k" | "4k" | "fourk" => Quality::Medium, // 720p MAX
-        _ => Quality::Low,
+    // Load persisted settings for this animation file, or default to Low (480p) and 30 fps for new files
+    let mut store = config::SettingsStore::load();
+    let saved_settings = store.get_for_file(&cli.file);
+
+    let quality = if let Some(ref q_str) = cli.quality {
+        match q_str.to_lowercase().as_str() {
+            "m" | "medium" | "med" => Quality::Medium,
+            "h" | "high" => Quality::High,
+            "k" | "4k" | "fourk" => Quality::FourK,
+            _ => Quality::Low,
+        }
+    } else if let Some(ref saved) = saved_settings {
+        saved.quality
+    } else {
+        Quality::Low
     };
+
+    let fps = if let Some(cli_fps) = cli.fps {
+        cli_fps.clamp(1, 120)
+    } else if let Some(ref saved) = saved_settings {
+        saved.fps.clamp(1, 120)
+    } else {
+        30
+    };
+
+    // Ensure settings are recorded for this file
+    let _ = store.set_for_file(&cli.file, quality, fps);
 
     // Protocol override
     let protocol = match cli.protocol.to_lowercase().as_str() {
@@ -160,7 +182,7 @@ fn main() -> Result<()> {
         scene_name,
         editor_cmd,
         quality,
-        fps: cli.fps.clamp(1, 30),
+        fps,
         protocol,
         manim_bin: cli.manim,
     };

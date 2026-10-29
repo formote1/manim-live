@@ -7,7 +7,7 @@ pub mod theme;
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Paragraph, Widget},
 };
@@ -104,26 +104,10 @@ pub fn render_status_bar(
         ),
     };
 
-    let make_pill = |label: &'static str, key: &'static str, key_color: Color| -> Vec<Span<'static>> {
-        vec![
-            Span::styled(" [", Style::default().fg(palette.border_unfocused)),
-            Span::styled(key, Style::default().fg(key_color).add_modifier(Modifier::BOLD)),
-            Span::styled(format!(" {}]", label), Style::default().fg(palette.text_primary)),
-        ]
-    };
-
-    let mut line_spans = vec![focus_badge, Span::raw(" ")];
-
-    line_spans.extend(make_pill("Code", "F1", palette.accent_mauve));
-    line_spans.extend(make_pill("Preview", "F2", palette.accent_blue));
-    line_spans.extend(make_pill("Console", "F3", palette.accent_sapphire));
-    line_spans.extend(make_pill("Settings", "F4", palette.accent_blue));
-    line_spans.extend(make_pill("Build", "F5", palette.success_sage));
-    line_spans.extend(make_pill("Scenes", "F8", palette.accent_mauve));
+    let mut line_spans = vec![focus_badge, Span::raw("  ")];
 
     // Show jump to line error shortcut if compiler error is active
     if let Some(err) = active_error {
-        line_spans.push(Span::styled("  ", Style::default()));
         line_spans.push(Span::styled(
             format!(" [F7: Jump to Line {}] ", err.line_number),
             Style::default()
@@ -131,17 +115,56 @@ pub fn render_status_bar(
                 .bg(palette.error_coral)
                 .add_modifier(Modifier::BOLD),
         ));
+        line_spans.push(Span::raw("  "));
     }
 
     line_spans.push(Span::styled(
-        format!("  ({} • {}fps)  ", quality, fps),
+        format!("({} • {}fps)", quality, fps),
         Style::default().fg(palette.text_dimmed),
     ));
-    line_spans.extend(make_pill("Quit", "Ctrl+Q", palette.error_coral));
 
     let line = Line::from(line_spans);
     let p = Paragraph::new(line)
         .alignment(Alignment::Center)
         .style(Style::default().bg(palette.bg_crust));
     p.render(area, buf);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use theme::ThemeId;
+
+    #[test]
+    fn test_status_bar_only_shows_current_badge() {
+        let palette = ThemeId::CatppuccinMocha.palette();
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = Buffer::empty(area);
+
+        render_status_bar(
+            area,
+            &mut buf,
+            FocusPane::Editor,
+            "Low (480p)",
+            30,
+            None,
+            &palette,
+        );
+
+        let content = (0..area.width)
+            .map(|x| buf.cell((x, 0)).unwrap().symbol())
+            .collect::<String>();
+
+        // Current badge is shown
+        assert!(content.contains("F1 CODE"));
+        // Status info is shown
+        assert!(content.contains("Low (480p) • 30fps"));
+        // Old available options pills are NOT shown
+        assert!(!content.contains("[F2 Preview]"));
+        assert!(!content.contains("[F3 Console]"));
+        assert!(!content.contains("[F4 Settings]"));
+        assert!(!content.contains("[F5 Build]"));
+        assert!(!content.contains("[F8 Scenes]"));
+        assert!(!content.contains("[Ctrl+Q Quit]"));
+    }
 }

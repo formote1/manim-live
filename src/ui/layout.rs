@@ -105,5 +105,25 @@ impl AppLayout {
     pub fn compute(area: Rect) -> Self {
         Self::compute_with_splits(area, 0.55, 0.50)
     }
+
+    /// Fullscreen preview layout: allocates entire work canvas to live preview.
+    pub fn compute_fullscreen_preview(area: Rect) -> Self {
+        let root_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(5),
+                Constraint::Length(1),
+            ])
+            .split(area);
+
+        Self {
+            editor_area: Rect::default(),
+            preview_area: root_chunks[0],
+            console_area: Rect::default(),
+            status_bar_area: root_chunks[1],
+            h_sep_col: 0,
+            v_sep_row: 0,
+        }
+    }
 }
 
