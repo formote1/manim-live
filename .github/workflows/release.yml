@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: manim-live
+            use_cross: false
+
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary_name: manim-live
+            use_cross: true
+
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            binary_name: manim-live
+            use_cross: true
+
+          - os: macos-13
+            target: x86_64-apple-darwin
+            binary_name: manim-live
+            use_cross: false
+
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: manim-live
+            use_cross: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (if required)
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build Release Binary
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Package Release Assets
+        shell: bash
+        run: |
+          BIN_PATH="target/${{ matrix.target }}/release/${{ matrix.binary_name }}"
+          ARCHIVE_NAME="manim-live-${{ matrix.target }}.tar.gz"
+          
+          # Strip symbols to reduce size on Linux
+          if [[ "${{ matrix.target }}" == *"linux"* ]]; then
+            strip "${BIN_PATH}" || true
+          fi
+
+          tar -czf "${ARCHIVE_NAME}" -C "$(dirname "${BIN_PATH}")" "${{ matrix.binary_name }}"
+          
+          # Generate SHA256 checksum
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
+          else
+            shasum -a 256 "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
+          fi
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            manim-live-${{ matrix.target }}.tar.gz
+            manim-live-${{ matrix.target }}.tar.gz.sha256
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare Assets for Release
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.sha256" \) -exec cp {} release-assets/ \;
+          ls -la release-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
