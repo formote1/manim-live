@@ -30,7 +30,7 @@ use ratatui::{
 };
 use std::{
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -75,6 +75,41 @@ impl ScenePaletteState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct FilePaletteState {
+    pub is_open: bool,
+    pub available_files: Vec<PathBuf>,
+    pub selected_idx: usize,
+    pub search_query: String,
+}
+
+impl FilePaletteState {
+    pub fn new() -> Self {
+        Self {
+            is_open: false,
+            available_files: Vec::new(),
+            selected_idx: 0,
+            search_query: String::new(),
+        }
+    }
+
+    pub fn filtered_files(&self) -> Vec<&PathBuf> {
+        let q = self.search_query.trim().to_lowercase();
+        if q.is_empty() {
+            self.available_files.iter().collect()
+        } else {
+            self.available_files
+                .iter()
+                .filter(|p| {
+                    let name = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+                    let path_str = p.to_string_lossy().to_lowercase();
+                    name.contains(&q) || path_str.contains(&q)
+                })
+                .collect()
+        }
+    }
+}
+
 /// Which separator is being dragged, if any.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DragTarget {
@@ -112,6 +147,8 @@ pub struct App {
     pub is_settings_open: bool,
     /// Scene palette state
     pub scene_palette: ScenePaletteState,
+    /// File palette state (Dynamic file selector)
+    pub file_palette: FilePaletteState,
     /// Active theme color palette
     pub palette: ThemePalette,
     /// Whether the preview pane is currently expanded to fullscreen
@@ -171,6 +208,7 @@ impl App {
             settings_state,
             is_settings_open: false,
             scene_palette: ScenePaletteState::new(),
+            file_palette: FilePaletteState::new(),
             palette,
             is_preview_fullscreen: false,
             last_cursor_pos: None,
@@ -185,6 +223,62 @@ impl App {
             self.config.fps,
             self.config.manim_bin.as_deref(),
         );
+    }
+
+    pub fn switch_file(&mut self, new_file: PathBuf) -> Result<()> {
+        if self.config.file_path == new_file {
+            return Ok(());
+        }
+
+        self.save_settings();
+        self.config.file_path = new_file.clone();
+
+        let mut store = crate::config::SettingsStore::load();
+        if let Some(s) = store.get_for_file_or_latest(&new_file) {
+            self.config.quality = s.quality;
+            self.config.fps = s.fps;
+            self.settings_state.quality = s.quality;
+            self.settings_state.fps = s.fps;
+            self.preview_state.fps = s.fps;
+        }
+        let _ = store.set_latest_preferences(
+            Some(&new_file),
+            self.config.quality,
+            self.config.fps,
+            Some(self.settings_state.theme.name()),
+            Some(self.settings_state.editor.as_cmd()),
+        );
+
+        // Detect first scene in new file
+        self.config.scene_name = crate::ui::console::detect_all_scenes(&new_file).into_iter().next();
+
+        // Respawn file watcher
+        let (tx_watch, rx_watch) = unbounded();
+        self.rx_watch = rx_watch;
+        self._watcher = FileWatcher::new(
+            &self.config.file_path,
+            Duration::from_millis(300),
+            tx_watch,
+        )
+        .ok();
+
+        // Respawn PTY editor
+        let (cols, rows) = self.last_editor_size;
+        match PtyManager::spawn(&self.config.editor_cmd, &self.config.file_path, cols, rows) {
+            Ok(pty) => {
+                self.pty = Some(pty);
+                self.console_state.add_line(format!("Opened animation file: {}", new_file.display()));
+            }
+            Err(e) => {
+                self.console_state.add_line(format!("✖ Failed to launch editor for file: {}", e));
+            }
+        }
+
+        self.preview_state.frames.clear();
+        self.preview_state.force_redraw = true;
+        self.trigger_rebuild();
+
+        Ok(())
     }
 
     pub fn switch_editor(&mut self, new_cmd: &str) -> Result<()> {
@@ -391,9 +485,9 @@ impl App {
                     (ratatui::widgets::BorderType::Thick, ratatui::widgets::BorderType::Rounded)
                 };
 
-                let editor_focused = self.focus == FocusPane::Editor && !self.is_settings_open && !self.scene_palette.is_open;
-                let preview_focused = (self.focus == FocusPane::Preview || self.is_preview_fullscreen) && !self.is_settings_open && !self.scene_palette.is_open;
-                let console_focused = self.focus == FocusPane::Console && !self.is_settings_open && !self.scene_palette.is_open;
+                let editor_focused = self.focus == FocusPane::Editor && !self.is_settings_open && !self.scene_palette.is_open && !self.file_palette.is_open;
+                let preview_focused = (self.focus == FocusPane::Preview || self.is_preview_fullscreen) && !self.is_settings_open && !self.scene_palette.is_open && !self.file_palette.is_open;
+                let console_focused = self.focus == FocusPane::Console && !self.is_settings_open && !self.scene_palette.is_open && !self.file_palette.is_open;
 
                 terminal.draw(|frame| {
                     let layout = if self.is_preview_fullscreen {
@@ -435,7 +529,7 @@ impl App {
                     // While modal is open, clear Kitty graphics and draw empty pane so nothing overlays modal
                     let preview_border = if preview_focused { border_type_focused } else { border_type_unfocused };
                     let is_building = matches!(self.console_state.build_state, BuildState::Building { .. });
-                    if !self.is_settings_open && !self.scene_palette.is_open {
+                    if !self.is_settings_open && !self.scene_palette.is_open && !self.file_palette.is_open {
                         self.preview_state.is_fullscreen = self.is_preview_fullscreen;
                         self.preview_state.render(
                             layout.preview_area,
@@ -494,6 +588,20 @@ impl App {
                         apply_backdrop_blur(frame.buffer_mut(), Some(modal_area));
                         render_settings_overlay(
                             &self.settings_state,
+                            frame.area(),
+                            frame.buffer_mut(),
+                            &self.palette,
+                        );
+                    } else if self.file_palette.is_open {
+                        let palette_w = 72.min(frame.area().width.saturating_sub(4));
+                        let palette_h = 18.min(frame.area().height.saturating_sub(4));
+                        let off_x = (frame.area().width.saturating_sub(palette_w)) / 2;
+                        let off_y = (frame.area().height.saturating_sub(palette_h)) / 2;
+                        let palette_area = Rect::new(frame.area().x + off_x, frame.area().y + off_y, palette_w, palette_h);
+                        apply_backdrop_blur(frame.buffer_mut(), Some(palette_area));
+                        render_file_palette_overlay(
+                            &self.file_palette,
+                            &self.config.file_path,
                             frame.area(),
                             frame.buffer_mut(),
                             &self.palette,
@@ -604,6 +712,56 @@ impl App {
             return Ok(());
         }
 
+        // If File Palette overlay is open, route all input to file_palette
+        if self.file_palette.is_open {
+            match key.code {
+                KeyCode::Esc | KeyCode::F(7) => {
+                    self.file_palette.is_open = false;
+                    self.preview_state.force_redraw = true;
+                }
+                KeyCode::Up => {
+                    let total = self.file_palette.filtered_files().len();
+                    if total > 0 {
+                        if self.file_palette.selected_idx == 0 {
+                            self.file_palette.selected_idx = total - 1;
+                        } else {
+                            self.file_palette.selected_idx -= 1;
+                        }
+                    }
+                }
+                KeyCode::Down => {
+                    let total = self.file_palette.filtered_files().len();
+                    if total > 0 {
+                        self.file_palette.selected_idx = (self.file_palette.selected_idx + 1) % total;
+                    }
+                }
+                KeyCode::Enter => {
+                    let chosen = {
+                        let filtered = self.file_palette.filtered_files();
+                        filtered.get(self.file_palette.selected_idx).copied().cloned()
+                    };
+                    if let Some(target) = chosen {
+                        self.file_palette.is_open = false;
+                        let _ = self.switch_file(target);
+                        self.preview_state.force_redraw = true;
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.file_palette.search_query.pop();
+                    self.file_palette.selected_idx = 0;
+                }
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    self.file_palette.search_query.push(c);
+                    self.file_palette.selected_idx = 0;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         // If Scene Palette overlay is open, route all input to scene_palette
         if self.scene_palette.is_open {
             match key.code {
@@ -705,6 +863,18 @@ impl App {
                     self.scene_palette.is_open = true;
                     clear_kitty_images();
                 }
+                SettingsAction::OpenFile => {
+                    self.is_settings_open = false;
+                    crate::ui::settings::clear_settings_logo();
+                    let discovered = crate::finder::discover_animation_files();
+                    let active = &self.config.file_path;
+                    let sel = discovered.iter().position(|p| p == active).unwrap_or(0);
+                    self.file_palette.available_files = discovered;
+                    self.file_palette.selected_idx = sel;
+                    self.file_palette.search_query.clear();
+                    self.file_palette.is_open = true;
+                    clear_kitty_images();
+                }
             }
             return Ok(());
         }
@@ -727,6 +897,27 @@ impl App {
             } else {
                 crate::ui::settings::clear_settings_logo();
                 self.preview_state.force_redraw = true;
+            }
+            return Ok(());
+        }
+
+        // Global hotkey F7 or Ctrl+O toggles File Palette overlay (Dynamic file selector)
+        if key.code == KeyCode::F(7)
+            || (key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(key.code, KeyCode::Char('o') | KeyCode::Char('O')))
+        {
+            if self.file_palette.is_open {
+                self.file_palette.is_open = false;
+                self.preview_state.force_redraw = true;
+            } else {
+                let discovered = crate::finder::discover_animation_files();
+                let active = &self.config.file_path;
+                let sel = discovered.iter().position(|p| p == active).unwrap_or(0);
+                self.file_palette.available_files = discovered;
+                self.file_palette.selected_idx = sel;
+                self.file_palette.search_query.clear();
+                self.file_palette.is_open = true;
+                clear_kitty_images();
             }
             return Ok(());
         }
@@ -1004,8 +1195,8 @@ impl App {
             return Ok(());
         }
 
-        // If Settings or Scene Palette overlay is open, mouse clicks inside modal are ignored
-        if self.is_settings_open || self.scene_palette.is_open {
+        // If Settings, File Palette, or Scene Palette overlay is open, mouse clicks inside modal are ignored
+        if self.is_settings_open || self.scene_palette.is_open || self.file_palette.is_open {
             return Ok(());
         }
 
@@ -1341,6 +1532,153 @@ pub fn render_scene_palette_overlay(
         Span::styled(" Select  •  ", Style::default().fg(palette.text_dimmed)),
         Span::styled("Enter", Style::default().fg(palette.accent_sapphire).add_modifier(Modifier::BOLD)),
         Span::styled(" Switch  •  ", Style::default().fg(palette.text_dimmed)),
+        Span::styled("Esc", Style::default().fg(palette.warn_peach).add_modifier(Modifier::BOLD)),
+        Span::styled(" Close", Style::default().fg(palette.text_dimmed)),
+    ]);
+    let footer_p = Paragraph::new(footer_line).alignment(Alignment::Center);
+    footer_p.render(chunks[2], buf);
+}
+
+pub fn render_file_palette_overlay(
+    palette_state: &FilePaletteState,
+    active_file: &Path,
+    area: Rect,
+    buf: &mut Buffer,
+    palette: &ThemePalette,
+) {
+    let modal_w = 72.min(area.width.saturating_sub(4));
+    let modal_h = 18.min(area.height.saturating_sub(4));
+
+    let offset_x = (area.width.saturating_sub(modal_w)) / 2;
+    let offset_y = (area.height.saturating_sub(modal_h)) / 2;
+    let modal_area = Rect::new(area.x + offset_x, area.y + offset_y, modal_w, modal_h);
+
+    Clear.render(modal_area, buf);
+
+    let border_type = if palette.is_high_contrast() {
+        BorderType::Plain
+    } else {
+        BorderType::Rounded
+    };
+
+    let block = Block::default()
+        .title(" ❪ Open Animation File (F7 / Ctrl+O) ❫ ")
+        .title_alignment(Alignment::Center)
+        .borders(ratatui::widgets::Borders::ALL)
+        .border_type(border_type)
+        .border_style(
+            Style::default()
+                .fg(palette.accent_mauve)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let inner_area = block.inner(modal_area);
+    block.render(modal_area, buf);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Search input box
+            Constraint::Min(4),    // Filtered files list
+            Constraint::Length(1), // Footer hotkey hints
+        ])
+        .split(inner_area);
+
+    // 1. Search input block
+    let search_block = Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(palette.accent_sapphire));
+
+    let search_inner = search_block.inner(chunks[0]);
+    search_block.render(chunks[0], buf);
+
+    let query_display = format!("> {}█", palette_state.search_query);
+    let search_p = Paragraph::new(Line::from(vec![
+        Span::styled(
+            query_display,
+            Style::default()
+                .fg(palette.text_primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    search_p.render(search_inner, buf);
+
+    // 2. Filtered files list
+    let filtered = palette_state.filtered_files();
+    let list_area = chunks[1];
+    let max_items = list_area.height as usize;
+
+    if filtered.is_empty() {
+        let empty_msg = Paragraph::new(Line::from(vec![
+            Span::styled("   No matching animation files found.", Style::default().fg(palette.text_dimmed)),
+        ]));
+        empty_msg.render(list_area, buf);
+    } else {
+        let scroll_offset = if palette_state.selected_idx >= max_items {
+            palette_state.selected_idx - max_items + 1
+        } else {
+            0
+        };
+
+        let mut lines = Vec::new();
+        for (idx, &file_path) in filtered.iter().enumerate().skip(scroll_offset).take(max_items) {
+            let is_selected = idx == palette_state.selected_idx;
+            let is_active = file_path == active_file;
+
+            let file_name = file_path.file_name().unwrap_or_default().to_string_lossy();
+            let parent_dir = file_path.parent().map(|p| p.to_string_lossy()).unwrap_or_default();
+
+            let prefix = if is_selected { " ▶ " } else { "   " };
+            let marker = if is_active { " * " } else { "   " };
+
+            let name_style = if is_selected {
+                Style::default()
+                    .fg(palette.accent_mauve)
+                    .bg(palette.bg_surface)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(palette.text_primary).add_modifier(Modifier::BOLD)
+            };
+
+            let mut spans = vec![
+                Span::styled(
+                    prefix,
+                    if is_selected {
+                        Style::default().fg(palette.accent_mauve).bg(palette.bg_surface).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(palette.text_dimmed)
+                    },
+                ),
+                Span::styled(
+                    marker,
+                    if is_active {
+                        Style::default().fg(palette.success_sage).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(palette.text_dimmed)
+                    },
+                ),
+                Span::styled(file_name, name_style),
+                Span::styled(format!("  ({})", parent_dir), Style::default().fg(palette.border_unfocused)),
+            ];
+
+            if is_active {
+                spans.push(Span::styled(" (Active)", Style::default().fg(palette.success_sage)));
+            }
+
+            lines.push(Line::from(spans));
+        }
+
+        let list_p = Paragraph::new(lines);
+        list_p.render(list_area, buf);
+    }
+
+    // 3. Footer hints
+    let footer_line = Line::from(vec![
+        Span::styled("↑/↓", Style::default().fg(palette.accent_blue).add_modifier(Modifier::BOLD)),
+        Span::styled(" Select  •  ", Style::default().fg(palette.text_dimmed)),
+        Span::styled("Enter", Style::default().fg(palette.accent_sapphire).add_modifier(Modifier::BOLD)),
+        Span::styled(" Open File  •  ", Style::default().fg(palette.text_dimmed)),
         Span::styled("Esc", Style::default().fg(palette.warn_peach).add_modifier(Modifier::BOLD)),
         Span::styled(" Close", Style::default().fg(palette.text_dimmed)),
     ]);

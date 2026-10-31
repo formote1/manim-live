@@ -109,6 +109,7 @@ pub enum SettingsAction {
     FocusPane(FocusPane),
     TriggerRebuild,
     OpenScenes,
+    OpenFile,
 }
 
 pub struct SettingsState {
@@ -145,6 +146,7 @@ impl SettingsState {
             KeyCode::F(2) => SettingsAction::FocusPane(FocusPane::Preview),
             KeyCode::F(3) => SettingsAction::FocusPane(FocusPane::Console),
             KeyCode::F(5) => SettingsAction::TriggerRebuild,
+            KeyCode::F(7) => SettingsAction::OpenFile,
             KeyCode::F(8) => SettingsAction::OpenScenes,
 
             KeyCode::Up | KeyCode::Char('k') => {
@@ -516,8 +518,8 @@ pub fn render_settings_overlay(
         Span::styled("[F2]", Style::default().fg(palette.accent_sapphire).add_modifier(Modifier::BOLD)),
         Span::styled(" Live Preview", Style::default().fg(palette.text_primary).add_modifier(Modifier::BOLD)),
         sep_bullet.clone(),
-        Span::styled("[F3]", Style::default().fg(palette.success_sage).add_modifier(Modifier::BOLD)),
-        Span::styled(" Console Logs", Style::default().fg(palette.text_primary).add_modifier(Modifier::BOLD)),
+        Span::styled("[F7]", Style::default().fg(palette.accent_blue).add_modifier(Modifier::BOLD)),
+        Span::styled(" Open File", Style::default().fg(palette.text_primary).add_modifier(Modifier::BOLD)),
         sep_bullet,
         Span::styled("[F5]", Style::default().fg(palette.warn_peach).add_modifier(Modifier::BOLD)),
         Span::styled(" Rebuild", Style::default().fg(palette.text_primary).add_modifier(Modifier::BOLD)),
@@ -605,6 +607,10 @@ mod tests {
         assert_eq!(
             settings.handle_key(KeyEvent::new(KeyCode::F(5), KeyModifiers::empty())),
             SettingsAction::TriggerRebuild
+        );
+        assert_eq!(
+            settings.handle_key(KeyEvent::new(KeyCode::F(7), KeyModifiers::empty())),
+            SettingsAction::OpenFile
         );
         assert_eq!(
             settings.handle_key(KeyEvent::new(KeyCode::F(8), KeyModifiers::empty())),

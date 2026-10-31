@@ -84,28 +84,34 @@ install -m 755 target/release/manim-live ~/.local/bin/manim-live
 ## 💻 Usage
 
 ```bash
-# Launch live studio on a Python file
-manim-live scene.py
+# Launch by bare filename from anywhere (dynamic search across recent projects)
+manim-live scene_1.py
+
+# Launch by stem without extension
+manim-live scene_1
+
+# Launch with no arguments (automatically opens latest animation or file picker)
+manim-live
 
 # Launch focused on a specific Scene class
-manim-live scene.py MyAnimatedCircle
+manim-live scene_1.py MyAnimatedCircle
 
 # Set initial preview quality and FPS cap
-manim-live scene.py --quality high --fps 60
+manim-live scene_1.py --quality high --fps 60
 
 # Choose your preferred embedded editor
-manim-live scene.py --editor nvim
+manim-live scene_1.py --editor nvim
 ```
 
 ### Command-Line Options
 
 | Option | Description | Default |
 |---|---|---|
-| `<FILE>` | Python file containing Manim scene definitions | *Required* |
+| `[FILE]` | Python animation file (supports bare names, stems, or full paths) | Latest / Auto-detected |
 | `[SCENE]` | Optional specific Scene class name to render | First detected |
-| `-q, --quality <QUALITY>` | Render quality (`low` 480p, `medium` 720p, `high` 1080p, `4k` 2160p) | `low` |
-| `--fps <FPS>` | Frame rate cap for live animation previews | `30` |
-| `-e, --editor <EDITOR>` | Preferred terminal editor (`micro`, `vim`, `nvim`, `nano`) | `micro` |
+| `-q, --quality <QUALITY>` | Render quality (`low` 480p, `medium` 720p, `high` 1080p, `4k` 2160p) | Saved / `low` |
+| `--fps <FPS>` | Frame rate cap for live animation previews | Saved / `30` |
+| `-e, --editor <EDITOR>` | Preferred terminal editor (`micro`, `vim`, `nvim`, `nano`) | Saved / `micro` |
 | `--protocol <PROTOCOL>` | Image rendering protocol (`auto`, `kitty`, `halfblocks`) | `auto` |
 | `--manim <PATH>` | Custom path or binary executable for Manim | System PATH / venv |
 
@@ -137,6 +143,7 @@ manim-live scene.py --editor nvim
 | Key | Action |
 |---|---|
 | `?` / `F4` | Toggle **Studio Settings** overlay |
+| `F7` / `Ctrl+O` | Open **File Palette** (dynamic file switcher) |
 | `F8` / `Ctrl+P` | Open **Scene Palette** (fuzzy scene switcher) |
 | `↑` / `↓` | Select setting row |
 | `←` / `→` | Cycle themes, editors, qualities, or FPS |

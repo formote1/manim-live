@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod finder;
 mod pty;
 mod runner;
 mod ui;
@@ -39,9 +40,9 @@ use std::{
     about = "Interactive TUI live-reloading studio for Python's Manim animation engine"
 )]
 pub struct Cli {
-    /// Python file containing Manim scene(s)
+    /// Python file containing Manim scene(s) (optional: auto-discovered if omitted)
     #[arg(value_name = "FILE")]
-    pub file: PathBuf,
+    pub file: Option<PathBuf>,
 
     /// Optional Scene name to render
     #[arg(value_name = "SCENE")]
@@ -138,15 +139,18 @@ fn get_cmd_version(cmd: &str, args: &[&str]) -> Option<String> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Dynamically resolve target python file (matches bare filename, stem, or recent projects)
+    let target_file = finder::resolve_target_file(cli.file.as_deref())?;
+
     // Check if target python file exists, or create starter template with sanitized scene name
-    ensure_target_file(&cli.file, cli.scene.as_deref())?;
+    ensure_target_file(&target_file, cli.scene.as_deref())?;
 
     // Auto-detect scene name from python file if not provided
-    let scene_name = cli.scene.or_else(|| detect_first_scene_name(&cli.file));
+    let scene_name = cli.scene.or_else(|| detect_first_scene_name(&target_file));
 
     // Load persisted settings for this animation file, or fallback to latest studio preference
     let mut store = config::SettingsStore::load();
-    let saved_settings = store.get_for_file_or_latest(&cli.file);
+    let saved_settings = store.get_for_file_or_latest(&target_file);
 
     let quality = if let Some(ref q_str) = cli.quality {
         match q_str.to_lowercase().as_str() {
@@ -179,7 +183,7 @@ fn main() -> Result<()> {
     };
 
     // Ensure settings are recorded for this file and latest
-    let _ = store.set_for_file(&cli.file, quality, fps);
+    let _ = store.set_for_file(&target_file, quality, fps);
 
     // Protocol override
     let protocol = match cli.protocol.to_lowercase().as_str() {
@@ -189,7 +193,7 @@ fn main() -> Result<()> {
     };
 
     let config = AppConfig {
-        file_path: cli.file,
+        file_path: target_file,
         scene_name,
         editor_cmd,
         quality,
