@@ -422,13 +422,14 @@ impl PreviewState {
                 }
             }
 
+            const GOLD: ratatui::style::Color = ratatui::style::Color::Rgb(255, 215, 0);
             let hud_spans = vec![
                 Span::styled(cur_time_str, Style::default().fg(palette.accent_blue).add_modifier(Modifier::BOLD)),
-                Span::styled("[ ", Style::default().fg(palette.text_dimmed)),
+                Span::styled("[ ", Style::default().fg(palette.border_unfocused)),
                 Span::styled(track_bar, Style::default().fg(palette.accent_mauve)),
-                Span::styled(" ] ", Style::default().fg(palette.text_dimmed)),
-                Span::styled(total_time_str, Style::default().fg(palette.text_muted)),
-                Span::styled(frame_counter, Style::default().fg(palette.text_dimmed)),
+                Span::styled(" ] ", Style::default().fg(palette.border_unfocused)),
+                Span::styled(total_time_str, Style::default().fg(palette.text_primary).add_modifier(Modifier::BOLD)),
+                Span::styled(frame_counter, Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
                 Span::styled(speed_badge, Style::default().fg(palette.warn_peach).add_modifier(Modifier::BOLD)),
             ];
 

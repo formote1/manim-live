@@ -139,8 +139,15 @@ impl App {
         // Spawn PTY with chosen editor
         let pty = PtyManager::spawn(&config.editor_cmd, &config.file_path, 80, 24).ok();
 
-        let settings_state = SettingsState::new(&config.editor_cmd, config.quality, config.fps);
-        let palette = ThemeId::CatppuccinMocha.palette();
+        let store = crate::config::SettingsStore::load();
+        let initial_theme = if let Some(ref theme_name) = store.latest_theme {
+            ThemeId::from_name(theme_name).unwrap_or(ThemeId::CatppuccinMocha)
+        } else {
+            ThemeId::CatppuccinMocha
+        };
+        let mut settings_state = SettingsState::new(&config.editor_cmd, config.quality, config.fps);
+        settings_state.theme = initial_theme;
+        let palette = initial_theme.palette();
 
         Ok(Self {
             config,
@@ -201,7 +208,13 @@ impl App {
 
     pub fn save_settings(&self) {
         let mut store = crate::config::SettingsStore::load();
-        let _ = store.set_for_file(&self.config.file_path, self.config.quality, self.config.fps);
+        let _ = store.set_latest_preferences(
+            Some(&self.config.file_path),
+            self.config.quality,
+            self.config.fps,
+            Some(self.settings_state.theme.name()),
+            Some(self.settings_state.editor.as_cmd()),
+        );
     }
 }
 
@@ -650,9 +663,11 @@ impl App {
                 }
                 SettingsAction::ApplyTheme(theme_id) => {
                     self.palette = theme_id.palette();
+                    self.save_settings();
                 }
                 SettingsAction::ApplyEditor(cmd) => {
                     let _ = self.switch_editor(&cmd);
+                    self.save_settings();
                 }
                 SettingsAction::ApplyQuality(q) => {
                     self.config.quality = q;

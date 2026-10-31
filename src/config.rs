@@ -16,6 +16,9 @@ pub struct AnimationSettings {
 
 #[derive(Debug, Clone, Default)]
 pub struct SettingsStore {
+    pub latest: Option<AnimationSettings>,
+    pub latest_theme: Option<String>,
+    pub latest_editor: Option<String>,
     pub files: HashMap<String, AnimationSettings>,
 }
 
@@ -74,11 +77,67 @@ impl SettingsStore {
             Err(_) => return store,
         };
 
+        let theme_re = match Regex::new(r#""theme"\s*:\s*"([^"]+)""#) {
+            Ok(r) => r,
+            Err(_) => return store,
+        };
+
+        let editor_re = match Regex::new(r#""editor"\s*:\s*"([^"]+)""#) {
+            Ok(r) => r,
+            Err(_) => return store,
+        };
+
         let key_re = match Regex::new(r#""((?:[^"\\]|\\.)+)""#) {
             Ok(r) => r,
             Err(_) => return store,
         };
 
+        // 1. Parse "latest" block if present
+        if let Some(latest_idx) = content.find(r#""latest""#) {
+            if let Some(open_rel) = content[latest_idx..].find('{') {
+                let open_brace = latest_idx + open_rel;
+                if let Some(close_rel) = content[open_brace..].find('}') {
+                    let latest_body = &content[open_brace + 1..open_brace + close_rel];
+                    let quality = qual_re
+                        .captures(latest_body)
+                        .and_then(|c| c.get(1))
+                        .map(|m| match m.as_str().to_lowercase().as_str() {
+                            "m" | "medium" | "med" => Quality::Medium,
+                            "h" | "high" => Quality::High,
+                            "k" | "4k" | "fourk" => Quality::FourK,
+                            _ => Quality::Low,
+                        });
+
+                    let fps = fps_re
+                        .captures(latest_body)
+                        .and_then(|c| c.get(1))
+                        .and_then(|m| m.as_str().parse::<u32>().ok())
+                        .map(|f| f.clamp(1, 120));
+
+                    if let (Some(q), Some(f)) = (quality, fps) {
+                        store.latest = Some(AnimationSettings { quality: q, fps: f });
+                    } else if let Some(q) = quality {
+                        store.latest = Some(AnimationSettings { quality: q, fps: 30 });
+                    } else if let Some(f) = fps {
+                        store.latest = Some(AnimationSettings { quality: Quality::Low, fps: f });
+                    }
+
+                    if let Some(caps) = theme_re.captures(latest_body) {
+                        if let Some(m) = caps.get(1) {
+                            store.latest_theme = Some(m.as_str().to_string());
+                        }
+                    }
+
+                    if let Some(caps) = editor_re.captures(latest_body) {
+                        if let Some(m) = caps.get(1) {
+                            store.latest_editor = Some(m.as_str().to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Parse "files" block
         let files_idx = match content.find(r#""files""#) {
             Some(i) => i,
             None => return store,
@@ -140,6 +199,11 @@ impl SettingsStore {
             }
         }
 
+        // If no latest preference was explicitly saved, use the first file preference as fallback
+        if store.latest.is_none() && !store.files.is_empty() {
+            store.latest = store.files.values().next().copied();
+        }
+
         store
     }
 
@@ -148,14 +212,60 @@ impl SettingsStore {
         self.files.get(&key).copied()
     }
 
+    pub fn get_for_file_or_latest(&self, path: &Path) -> Option<AnimationSettings> {
+        self.get_for_file(path).or(self.latest)
+    }
+
     pub fn set_for_file(&mut self, path: &Path, quality: Quality, fps: u32) -> Result<()> {
         let key = Self::normalize_key(path);
         self.files.insert(key, AnimationSettings { quality, fps });
+        self.latest = Some(AnimationSettings { quality, fps });
+        self.save()
+    }
+
+    pub fn set_latest_preferences(
+        &mut self,
+        path: Option<&Path>,
+        quality: Quality,
+        fps: u32,
+        theme: Option<&str>,
+        editor: Option<&str>,
+    ) -> Result<()> {
+        if let Some(p) = path {
+            let key = Self::normalize_key(p);
+            self.files.insert(key, AnimationSettings { quality, fps });
+        }
+        self.latest = Some(AnimationSettings { quality, fps });
+        if let Some(t) = theme {
+            self.latest_theme = Some(t.to_string());
+        }
+        if let Some(e) = editor {
+            self.latest_editor = Some(e.to_string());
+        }
         self.save()
     }
 
     pub fn to_json(&self) -> String {
-        let mut json = String::from("{\n  \"files\": {\n");
+        let mut json = String::from("{\n");
+        if let Some(ref latest) = self.latest {
+            let q_str = match latest.quality {
+                Quality::Low => "low",
+                Quality::Medium => "medium",
+                Quality::High => "high",
+                Quality::FourK => "4k",
+            };
+            json.push_str("  \"latest\": {\n");
+            json.push_str(&format!("    \"quality\": {:?},\n", q_str));
+            json.push_str(&format!("    \"fps\": {}", latest.fps));
+            if let Some(ref t) = self.latest_theme {
+                json.push_str(&format!(",\n    \"theme\": {:?}", t));
+            }
+            if let Some(ref e) = self.latest_editor {
+                json.push_str(&format!(",\n    \"editor\": {:?}", e));
+            }
+            json.push_str("\n  },\n");
+        }
+        json.push_str("  \"files\": {\n");
         let mut entries: Vec<_> = self.files.iter().collect();
         entries.sort_by_key(|&(k, _)| k);
 
@@ -294,6 +404,40 @@ mod tests {
             Some(&AnimationSettings {
                 quality: Quality::Low,
                 fps: 1 // clamped to 1
+            })
+        );
+    }
+
+    #[test]
+    fn test_store_remembers_latest_and_defaults_for_new_files() {
+        let mut store = SettingsStore::default();
+        store.latest = Some(AnimationSettings {
+            quality: Quality::High,
+            fps: 60,
+        });
+        store.latest_theme = Some("Gruvbox Dark".to_string());
+        store.latest_editor = Some("micro".to_string());
+
+        let json = store.to_json();
+        let parsed = SettingsStore::parse_json(&json);
+
+        assert_eq!(
+            parsed.latest,
+            Some(AnimationSettings {
+                quality: Quality::High,
+                fps: 60,
+            })
+        );
+        assert_eq!(parsed.latest_theme.as_deref(), Some("Gruvbox Dark"));
+        assert_eq!(parsed.latest_editor.as_deref(), Some("micro"));
+
+        // New file gets latest settings
+        let new_file = Path::new("/some/new_animation.py");
+        assert_eq!(
+            parsed.get_for_file_or_latest(new_file),
+            Some(AnimationSettings {
+                quality: Quality::High,
+                fps: 60,
             })
         );
     }

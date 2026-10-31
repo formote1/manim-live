@@ -34,6 +34,25 @@ impl ThemeId {
         }
     }
 
+    pub fn from_name(name: &str) -> Option<Self> {
+        let lower = name.to_lowercase();
+        if lower.contains("tokyo") {
+            Some(ThemeId::TokyoNight)
+        } else if lower.contains("gruvbox") {
+            Some(ThemeId::GruvboxDark)
+        } else if lower.contains("nord") {
+            Some(ThemeId::Nord)
+        } else if lower.contains("dracula") {
+            Some(ThemeId::Dracula)
+        } else if lower.contains("contrast") {
+            Some(ThemeId::HighContrast)
+        } else if lower.contains("catppuccin") || lower.contains("mocha") {
+            Some(ThemeId::CatppuccinMocha)
+        } else {
+            None
+        }
+    }
+
     pub fn is_high_contrast(&self) -> bool {
         matches!(self, ThemeId::HighContrast)
     }

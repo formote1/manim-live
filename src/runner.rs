@@ -104,16 +104,11 @@ pub fn resolve_manim(explicit: Option<&str>, target_file: &Path) -> Option<Resol
                     venv_dir: venv,
                 });
             }
-            if let Ok(output) = Command::new("which").arg(exp).output() {
-                if output.status.success() {
-                    let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !path_str.is_empty() {
-                        return Some(ResolvedManim {
-                            bin_path: PathBuf::from(path_str),
-                            venv_dir: None,
-                        });
-                    }
-                }
+            if let Ok(path) = which::which(exp) {
+                return Some(ResolvedManim {
+                    bin_path: path,
+                    venv_dir: None,
+                });
             }
         }
     }
@@ -176,16 +171,11 @@ pub fn resolve_manim(explicit: Option<&str>, target_file: &Path) -> Option<Resol
     }
 
     // Check system PATH
-    if let Ok(output) = Command::new("which").arg("manim").output() {
-        if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path_str.is_empty() {
-                return Some(ResolvedManim {
-                    bin_path: PathBuf::from(path_str),
-                    venv_dir: None,
-                });
-            }
-        }
+    if let Ok(path) = which::which("manim") {
+        return Some(ResolvedManim {
+            bin_path: path,
+            venv_dir: None,
+        });
     }
 
     None

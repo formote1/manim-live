@@ -118,10 +118,12 @@ pub fn render_status_bar(
         line_spans.push(Span::raw("  "));
     }
 
-    line_spans.push(Span::styled(
-        format!("({} • {}fps)", quality, fps),
-        Style::default().fg(palette.text_dimmed),
-    ));
+    const GOLD: ratatui::style::Color = ratatui::style::Color::Rgb(255, 215, 0);
+    line_spans.push(Span::styled(" (", Style::default().fg(palette.border_unfocused)));
+    line_spans.push(Span::styled(quality, Style::default().fg(palette.text_primary).add_modifier(Modifier::BOLD)));
+    line_spans.push(Span::styled(" • ", Style::default().fg(palette.border_unfocused)));
+    line_spans.push(Span::styled(format!("{}fps", fps), Style::default().fg(GOLD).add_modifier(Modifier::BOLD)));
+    line_spans.push(Span::styled(")", Style::default().fg(palette.border_unfocused)));
 
     let line = Line::from(line_spans);
     let p = Paragraph::new(line)

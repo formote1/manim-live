@@ -82,19 +82,24 @@ pub struct DependencyReport {
     pub dvisvgm_path: Option<PathBuf>,
 }
 
+/// Instant non-blocking check (<1ms): checks whether manim and ffmpeg exist without spawning version probes
+pub fn fast_probe_dependencies(target_file: &Path, explicit_manim: Option<&str>) -> (Option<PathBuf>, Option<PathBuf>) {
+    let manim = runner::resolve_manim(explicit_manim, target_file).map(|r| r.bin_path);
+    let ffmpeg = which::which("ffmpeg").ok();
+    (manim, ffmpeg)
+}
+
 pub fn probe_environment(target_file: &Path, explicit_manim: Option<&str>) -> DependencyReport {
     let resolved_manim = runner::resolve_manim(explicit_manim, target_file);
     let manim_path = resolved_manim.map(|r| r.bin_path);
     let manim_version = manim_path
         .as_ref()
-        .and_then(|p| get_cmd_version(p.to_str().unwrap_or("manim"), &["--version"]))
-        .or_else(|| get_cmd_version("manim", &["--version"]));
+        .and_then(|p| get_cmd_version(p.to_str().unwrap_or("manim"), &["--version"]));
 
     let python_path = which::which("python3").or_else(|_| which::which("python")).ok();
     let python_version = python_path
         .as_ref()
-        .and_then(|p| get_cmd_version(p.to_str().unwrap_or("python3"), &["--version"]))
-        .or_else(|| get_cmd_version("python3", &["--version"]));
+        .and_then(|p| get_cmd_version(p.to_str().unwrap_or("python3"), &["--version"]));
 
     let ffmpeg_path = which::which("ffmpeg").ok();
     let dvisvgm_path = which::which("dvisvgm").ok();
@@ -139,12 +144,9 @@ fn main() -> Result<()> {
     // Auto-detect scene name from python file if not provided
     let scene_name = cli.scene.or_else(|| detect_first_scene_name(&cli.file));
 
-    // Resolve editor command
-    let editor_cmd = resolve_editor(cli.editor.as_deref());
-
-    // Load persisted settings for this animation file, or default to Low (480p) and 30 fps for new files
+    // Load persisted settings for this animation file, or fallback to latest studio preference
     let mut store = config::SettingsStore::load();
-    let saved_settings = store.get_for_file(&cli.file);
+    let saved_settings = store.get_for_file_or_latest(&cli.file);
 
     let quality = if let Some(ref q_str) = cli.quality {
         match q_str.to_lowercase().as_str() {
@@ -167,7 +169,16 @@ fn main() -> Result<()> {
         30
     };
 
-    // Ensure settings are recorded for this file
+    // Resolve editor command: explicit CLI > saved latest editor > $EDITOR > default
+    let editor_cmd = if let Some(ref e) = cli.editor {
+        resolve_editor(Some(e))
+    } else if let Some(ref saved_e) = store.latest_editor {
+        saved_e.clone()
+    } else {
+        resolve_editor(None)
+    };
+
+    // Ensure settings are recorded for this file and latest
     let _ = store.set_for_file(&cli.file, quality, fps);
 
     // Protocol override
@@ -208,9 +219,9 @@ fn main() -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("Failed to create terminal backend")?;
 
-    // Pre-flight dependency check (Phase 4)
-    let report = probe_environment(&config.file_path, config.manim_bin.as_deref());
-    let can_proceed = if report.manim_path.is_none() || report.ffmpeg_path.is_none() {
+    // Pre-flight dependency check (Phase 4): fast path takes <1ms without spawning version probes
+    let (fast_manim, fast_ffmpeg) = fast_probe_dependencies(&config.file_path, config.manim_bin.as_deref());
+    let can_proceed = if fast_manim.is_none() || fast_ffmpeg.is_none() {
         run_diagnostic_screen(&mut terminal, &config.file_path, config.manim_bin.as_deref())?
     } else {
         true
