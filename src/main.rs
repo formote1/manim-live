@@ -4,6 +4,7 @@ mod finder;
 mod pty;
 mod runner;
 mod ui;
+mod uninstall;
 mod watcher;
 
 use anyhow::{Context, Result};
@@ -71,6 +72,14 @@ pub struct Cli {
     /// Custom path or command for manim executable
     #[arg(long, value_name = "PATH")]
     pub manim: Option<String>,
+
+    /// Completely uninstall manim-live and remove binaries, configuration, and caches
+    #[arg(long)]
+    pub uninstall: bool,
+
+    /// Automatically confirm uninstallation without interactive prompt
+    #[arg(short = 'y', long)]
+    pub yes: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +147,12 @@ fn get_cmd_version(cmd: &str, args: &[&str]) -> Option<String> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Fast path: application uninstallation
+    if cli.uninstall {
+        uninstall::execute_uninstallation(cli.yes)?;
+        return Ok(());
+    }
 
     // Dynamically resolve target python file (matches bare filename, stem, or recent projects)
     let target_file = finder::resolve_target_file(cli.file.as_deref())?;

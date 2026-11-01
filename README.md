@@ -114,6 +114,8 @@ manim-live scene_1.py --editor nvim
 | `-e, --editor <EDITOR>` | Preferred terminal editor (`micro`, `vim`, `nvim`, `nano`) | Saved / `micro` |
 | `--protocol <PROTOCOL>` | Image rendering protocol (`auto`, `kitty`, `halfblocks`) | `auto` |
 | `--manim <PATH>` | Custom path or binary executable for Manim | System PATH / venv |
+| `--uninstall` | Completely remove manim-live, binary, configs, and caches | — |
+| `-y, --yes` | Confirm uninstallation without interactive prompt | `false` |
 
 ---
 
@@ -148,6 +150,33 @@ manim-live scene_1.py --editor nvim
 | `↑` / `↓` | Select setting row |
 | `←` / `→` | Cycle themes, editors, qualities, or FPS |
 | `Esc` | Close overlay / exit fullscreen |
+
+---
+
+## 🗑️ Uninstallation
+
+If you ever wish to completely remove `manim-live`, you can do so in a single command. The uninstaller removes the binary, configuration directory (`~/.config/manim-live`), and cached assets:
+
+### Via Installed Command
+```bash
+manim-live --uninstall
+```
+To bypass the confirmation prompt:
+```bash
+manim-live --uninstall -y
+```
+
+### Via Installer Script
+```bash
+# Using the local repository
+./uninstall.sh
+
+# Or via the installer script
+./install.sh --uninstall
+
+# Or without cloning
+curl -fsSL https://raw.githubusercontent.com/manim-live/manim-live/main/uninstall.sh | bash
+```
 
 ---
 

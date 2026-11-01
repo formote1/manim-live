@@ -15,6 +15,35 @@ BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m' # No Color
 
+# Check for uninstallation request
+for arg in "$@"; do
+    if [ "${arg}" = "--uninstall" ] || [ "${arg}" = "-u" ] || [ "${arg}" = "uninstall" ]; then
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+        if [ -f "${SCRIPT_DIR}/uninstall.sh" ]; then
+            exec "${SCRIPT_DIR}/uninstall.sh" "$@"
+        fi
+
+        # Fallback self-contained uninstallation for curl | bash
+        echo -e "${RED}${BOLD}manim-live Uninstaller${NC}"
+        echo -e "${DIM}====================================================${NC}\n"
+        TARGETS=(
+            "${HOME}/.local/bin/manim-live"
+            "${HOME}/.cargo/bin/manim-live"
+            "/usr/local/bin/manim-live"
+            "${HOME}/.config/manim-live"
+            "${HOME}/.cache/manim-live"
+        )
+        for t in "${TARGETS[@]}"; do
+            if [ -e "${t}" ]; then
+                rm -rf "${t}" 2>/dev/null || sudo rm -rf "${t}" 2>/dev/null || true
+                echo -e "${GREEN}${BOLD}✔${NC} Deleted: ${t}"
+            fi
+        done
+        echo -e "\n${GREEN}${BOLD}✔ manim-live completely uninstalled!${NC}"
+        exit 0
+    fi
+done
+
 # Determine installation directory
 INSTALL_DIR="${HOME}/.local/bin"
 if [ "$(id -u)" -eq 0 ]; then

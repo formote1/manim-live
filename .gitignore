@@ -3,3 +3,5 @@ media/
 *.mp4
 *.png
 !assets/*.png
+AGENT.md
+REFINED.md
